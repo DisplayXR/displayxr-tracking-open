@@ -147,3 +147,55 @@ why — so the Dashboard and MCP read one snapshot.
 3. This repo: viewer role.
 4. Hands role.
 5. Installers, bundle section, `versions.json`, Dashboard options and calibration.
+
+## 10. Camera pose calibration (mirror alignment)
+
+The display's front surface is a weak mirror. An eye at display-space `E = (x, y, z)` has its
+virtual image at `(x, y, −z)`, so the line from an eye to its own reflection is the display
+normal through `(x, y, 0)`. Two exact consequences:
+
+- **Own pupil:** an open eye sees a dot overlap its own pupil's reflection exactly when that eye
+  is on the normal through the dot. Distance from the display does not matter.
+- **Closed-eye variant (the easiest to sight):** the right eye sees the closed left eye's
+  reflection along `R → L'`, which crosses the display at `t = z_R / (z_R + z_L)`: the midpoint of
+  the two eyes for a level head. Ten degrees of head yaw moves it by about 0.3 mm.
+
+Each alignment therefore pins the target eye point's `(x, y)` to the dot's known physical position
+(pixel offset × pixel pitch, from the display's reported metres), with no depth at all.
+
+**Model.** Camera pose `(R, T)` in display space. The face landmarker gives the eye point's
+direction `u_i` in camera space (accurate) and a depth `s̃_i` from iris size (about ±5–10 %).
+For each sample `i`, `T + s_i·R·u_i` has `x, y` = the dot `D_i` (two equations, one new unknown
+`s_i`).
+
+| Assumption | Unknowns | Samples needed | Notes |
+|---|---|---|---|
+| `R = I`, use the iris depth | `T_x, T_y` | 1 | lateral error ≈ depth error × ray angle (≈ 20 mm at 60 cm for a 10 % depth error), so only a first guess |
+| `R = I`, `T_z = 0`, depth solved | `T_x, T_y, s_1…s_N` | 2, at **distinct dots** | one dot at several distances is degenerate (scale ambiguity); the dot baseline fixes the scale |
+| + pitch (clip-on webcams) | + `θ` | 3 | needs two head distances for conditioning |
+| full `R`, plus focal length | 6 + 1 | ≥ 7 in theory, 9 in practice | 3×3 grid at 15 % inset, two distances |
+
+- **`T_z` is not observable** from the mirror when `R = I` (it never enters the `x, y`
+  equations). Assume 0 for a bezel camera; it biases viewer distance one-for-one by a few mm,
+  which is negligible for the projection.
+- **A built-in laptop camera is coplanar with the panel** (rigid lid), so `R = I` is exact there
+  and two to three samples suffice. Default prior before calibration: top-centre, `T_y = H/2 + 8 mm`.
+- **Bonus:** the solved `s_i` against the iris estimate `s̃_i` gives the user's own iris size,
+  which removes the largest depth error.
+
+**Procedure.**
+1. Black screen with a white cross (2D mode on a 3D panel). Light the face with a dim ring far
+   from the cross, so the reflection is visible.
+2. "Close your left eye. With your right eye, find the reflection of your closed eye and move your
+   head until the cross sits on it." Capture on Space / pinch, or on 0.5 s of stable head pose.
+3. Points: centre, then left, right, top and bottom at 30 % inset, then centre again leaning
+   back. The head must stay inside the camera's view, so use an inset, not the corners.
+4. Least-squares solve; reject a sample whose residual exceeds 5 mm; show the RMS.
+5. **Live check:** draw the dot at the predicted foot of the eye point in real time. If the
+   calibration is right, the dot stays on the eye's reflection while the head moves. Arrow keys
+   nudge `T_x, T_y` for a final touch.
+
+**Limits.** A matte or anti-glare screen gives no usable reflection; those need a fallback (a 3D
+panel can use a "swim" test: the user adjusts until a stereo object at depth stops moving as the
+head moves). A display that tracks the viewer itself needs no calibration. The result is stored
+per camera and per screen through the host settings.
