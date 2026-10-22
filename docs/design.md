@@ -199,3 +199,20 @@ For each sample `i`, `T + s_i·R·u_i` has `x, y` = the dot `D_i` (two equations
 panel can use a "swim" test: the user adjusts until a stereo object at depth stops moving as the
 head moves). A display that tracks the viewer itself needs no calibration. The result is stored
 per camera and per screen through the host settings.
+
+**Where it lives.** The **Calibrate camera…** button sits in the Dashboard's tracking-provider
+card, per screen and only on screens where the provider is the viewer source. The Dashboard
+stays "dumb" (ADR-051 D4: it links no runtime code and only drives `displayxr-cli`), so the split is:
+
+- **Dashboard:** the UI only. A borderless full-screen window on the target monitor (black, the
+  cross, prompts), capture on Space / stable pose, the live-check dot.
+- **`displayxr-cli tracking calibrate --screen <key> --watch --json`:** streams the provider's
+  raw camera-space eye-point samples as NDJSON (the `status --watch` pattern).
+- **`displayxr-cli tracking calibrate solve`:** the solver, runtime C code with unit tests, reusable
+  by any camera-based tracking provider. It takes the captured samples plus the dot positions in
+  metres and returns the pose, per-sample residuals and the iris scale.
+- **`displayxr-cli tracking options set`:** commits the result as provider settings, keyed per
+  camera and per screen.
+
+The method and solver belong to the tracking class, not to this provider: any provider that
+reports camera-space eye points gets calibration for free.
