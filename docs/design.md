@@ -49,9 +49,18 @@ Chosen per machine, in order:
 1. **The display's shared stereo camera** (ADR-043): when the active display plug-in exposes its
    tracker camera through the runtime's stereo camera source, the hands role consumes it as a
    camera consumer — no second device, no new privacy indicator, and calibrated stereo pairs give
-   triangulated metric hand points. Gated on a measurement: these streams are greyscale, about
-   640×480 per eye at 30 Hz, aimed at the face; the landmark models are trained on colour. Not
-   default until a spike shows hands detect at typical positions.
+   triangulated metric hand points. Measured on one panel (displayxr-tracking-open#1): 640×480
+   per eye, GRAY8, rectified side-by-side, about 56–60 Hz, HFOV 64° per eye, baseline 120 mm.
+   Hands raised **in front of the screen** are fully in frame; keyboard-level hands are outside it
+   by geometry (about 40° below the axis against a ±25° vertical field), so they need path (2).
+   Model spike: the hand-landmark model holds on greyscale once seeded, but the palm detector
+   loses about half the hands, so re-detection needs a seed (a face-anchored region, or a lower
+   detector threshold confirmed by landmark presence).
+   **Scope:** the shared stream carries frames only while the display tracks a viewer on that
+   screen (a 3D session there). A camera consumer does not wake the tracker; the source sits in
+   `WAITING` with no frames otherwise. The hands role therefore works on this source only during
+   a 3D session on that screen, unless the display vendor adds a camera-only wake or the
+   provider can register as a tracking party — both outside this repo.
 2. **A plain colour webcam** the runtime's tracker-camera denylist allows (ADR-043 Amendment 5).
 3. **None** → the role reports unavailable.
 
@@ -59,8 +68,9 @@ The viewer role uses only (2): it is only ever active on a screen whose display 
 and such a display has no shared tracker stream.
 
 Streams open **on demand** — the viewer role when a session is running on a screen it serves, the
-hands role when an app creates a hand tracker — and close when demand ends. Opening a shared
-display camera keeps that display's tracker running, so it must not be held open idle.
+hands role when an app creates a hand tracker — and close when demand ends. Hold **one** stream
+per demand window (each stream start raises the runtime's camera-in-use notice). On a shared
+display camera the role must tolerate `WAITING` with no frames and report it (§5).
 
 ## 4. What the display advertises (`XR_DXR_display_info`)
 
@@ -92,7 +102,12 @@ advertised tracking(screen) = DP tracks
 ## 5. Dashboard and status
 
 Standby is not disabled: the user's `Enabled` stays as set, and the reason is shown, the same
-way the display status snapshot reports warnings as data.
+way the display status snapshot reports warnings as data. Two distinct reasons: **standby**
+(outranked: the display tracks this screen) and **source paused** (the shared display camera
+has no frames: no 3D session on this screen).
+
+Per-screen selection reads the **segment's** display processor for that screen (each screen may
+have its own), not the primary's, and re-evaluates on hotplug.
 
 ```
 Tracking providers
@@ -114,6 +129,9 @@ why — so the Dashboard and MCP read one snapshot.
   macOS usage string lives on this provider's executable).
 - Frames never leave the process; only poses and joints are published. No frame is written to
   disk.
+- A service-started provider has no user to answer a per-executable consent prompt (60 s
+  timeout on Windows). The installer pre-consents the registered provider executable (as the
+  runtime installer allowlists the simulated display), and the Dashboard shows and revokes it.
 
 ## 7. Inference
 
@@ -124,10 +142,22 @@ why — so the Dashboard and MCP read one snapshot.
   landmarks, detection only on loss, left/right hand association, temporal filtering.
 - Metric head distance from iris diameter (about 11.7 mm across people) and the camera's field of
   view; camera placement assumed top-centre of the bezel, corrected by a one-step calibration.
-- Hands map into display space the same relative way as dedicated hand sensors (anchor + gain),
-  because the camera's pose relative to the display is not known.
-- First step is a spike: conversion fidelity against the reference models, and latency on an
-  integrated GPU.
+- Hands from a webcam map into display space the same relative way as dedicated hand sensors
+  (anchor + gain), because the webcam's pose relative to the display is not known until
+  calibrated (§10).
+- Hands from a shared display camera: the stream carries intrinsics and the stereo pose but not
+  the camera's pose in display space. Proposed (runtime): an append-only ADR-043 field "camera
+  pose in display space" that the display plug-in fills. With it, shared-camera hands are metric
+  directly (triangulate, transform) with no anchor, gain or calibration, and §10 becomes the
+  webcam-only path.
+- **Latency.** Samples are capture-timestamped and published into the runtime's target-time
+  eye ring (#2144 Part 1), which extrapolates to the frame's display time; without it a 30 Hz
+  webcam plus inference (50–100 ms) makes the image swim. Budget: capture → pose ≤ 25 ms
+  (inference measured at about 6.5 ms per frame on Apple Silicon GPU/NE for face + two hands in
+  tracking mode). Spike exit criterion: end-to-end latency measured on a hybrid Windows laptop.
+- Spike done on Apple Silicon: tf2onnx converts all four models exactly (< 3e-4 px against
+  TFLite); the Core ML execution provider needs MLProgram plus a small graph rewrite (explicit
+  convolution padding, PRelu slope shape), after which each model runs as one partition.
 
 ## 8. Packaging
 
@@ -141,8 +171,11 @@ why — so the Dashboard and MCP read one snapshot.
 
 ## 9. Order of work
 
-1. Runtime: the viewer-tracking provider class (#2144 Part 2), the viewer-policy slot (§4),
-   provider-as-camera-consumer, the composed advertisement, `sim_tracking`.
+1. Runtime: the viewer-tracking provider class (#2144 Part 2, PR #2292), the viewer-policy slot
+   (§4), the composed advertisement, `sim_tracking`. The viewer-policy slot ships in the first
+   runtime release after #2292 merges; display plug-ins pick it up through the downstream
+   `features` repin, and until then they read as `FIXED`. Then: service hosting, per-screen
+   routing, provider-as-camera-consumer, the ADR-043 display-space camera pose field.
 2. Spike: model conversion and latency (parallel with 1); shared-display-camera hand spike.
 3. This repo: viewer role.
 4. Hands role.
