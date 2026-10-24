@@ -1,0 +1,76 @@
+{
+  "schema": "displayxr-tracking-pack-1",
+  "name": "open-tracking-default",
+  "version": "1.0.0",
+  "source": {
+    "name": "MediaPipe Face Landmarker",
+    "url": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+    "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+    "size": 3758596,
+    "license": "Apache-2.0"
+  },
+  "conversion": {
+    "script": "scripts/fetch_models.py",
+    "opset": 17,
+    "versions": {
+      "tensorflow": "2.21.0",
+      "tf2onnx": "1.17.0",
+      "onnx": "1.23.2",
+      "onnxruntime": "1.31.0",
+      "numpy": "2.4.6",
+      "protobuf": "7.36.2",
+      "flatbuffers": "25.12.19"
+    }
+  },
+  "models": [
+    {
+      "role": "face_detector",
+      "name": "BlazeFace short range",
+      "from": "face_detector.tflite",
+      "from_sha256": "b4578f35940bf5a1a655214a1cce5cab13eba73c1297cd78e1a04c2380b0152f",
+      "file": "face_detector.onnx",
+      "sha256": "af191c89e0a8654f46b78af8e81ea5ffdef726a0cf8cde433ffbdb5ee5747ba0",
+      "size": 413258,
+      "input": {
+        "width": 128,
+        "height": 128,
+        "layout": "NHWC",
+        "range": [
+          -1,
+          1
+        ]
+      },
+      "license": "Apache-2.0",
+      "model_card": "https://storage.googleapis.com/mediapipe-assets/MediaPipe%20BlazeFace%20Model%20Card%20(Short%20Range).pdf"
+    },
+    {
+      "role": "face_landmarks",
+      "name": "Face Mesh V2 (478 landmarks incl. irises)",
+      "from": "face_landmarks_detector.tflite",
+      "from_sha256": "c7d54204ce0448474c7f3fa9af494787c0965cbdd6f20fc72867e43046bd43d5",
+      "file": "face_landmarks.onnx",
+      "sha256": "2055fc419110b2ca57aaf122b2597659f05cd299d88a6dcb28c99b5269f52cb1",
+      "size": 4821975,
+      "input": {
+        "width": 256,
+        "height": 256,
+        "layout": "NHWC",
+        "range": [
+          0,
+          1
+        ]
+      },
+      "license": "Apache-2.0",
+      "model_card": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf"
+    }
+  ],
+  "test_images": [
+    {
+      "name": "portrait",
+      "url": "https://storage.googleapis.com/mediapipe-assets/portrait.jpg",
+      "sha256": "a6f11efaa834706db23f275b6115058fa87fc7f14362681e6abe14e82749de3e",
+      "size": 176561,
+      "license": "public domain (official US-government portrait)"
+    }
+  ]
+}
