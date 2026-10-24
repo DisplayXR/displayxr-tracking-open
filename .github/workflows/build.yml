@@ -132,7 +132,7 @@ jobs:
             -DOPENTRACK_TEST_MODELS_DIR="${{ github.workspace }}/models-cache"
           cmake --build build
 
-      - name: Tests (file camera: blank frame + face photo, CPU and Core ML)
+      - name: Tests (file camera, blank frame + face photo, CPU and Core ML)
         run: ctest --test-dir build --output-on-failure
 
       - name: Pack blobs match
