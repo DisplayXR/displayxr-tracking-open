@@ -561,6 +561,7 @@ worker(void *arg)
 	struct ot_pose pose;
 	memset(&pose, 0, sizeof(pose));
 	struct ot_intrinsics k;
+	memset(&k, 0, sizeof(k));
 	int64_t last_pose_read = 0;
 	bool first_sample = true;
 	struct ot_stats stats;
@@ -744,10 +745,11 @@ ot_describe(struct xrt_tracking_plugin_instance *inst, struct xrt_tracking_provi
 	ot_lock(&g_p.lock);
 	out->typical_latency_ns = g_p.latency_ns;
 	if (g_p.state == OT_STATE_STOPPED || g_p.state == OT_STATE_RUNNING) {
-		snprintf(out->source, sizeof(out->source), "webcam '%s'%s%s%s", g_p.camera_name,
+		snprintf(out->source, sizeof(out->source), "webcam '%.96s'%s%s%s", g_p.camera_name,
 		         g_p.ep_used[0] != '\0' ? " (" : "", g_p.ep_used, g_p.ep_used[0] != '\0' ? ")" : "");
 	} else {
-		snprintf(out->source, sizeof(out->source), "webcam '%s': %s", g_p.camera_name, state_name(g_p.state));
+		snprintf(out->source, sizeof(out->source), "webcam '%.80s': %s", g_p.camera_name,
+		         state_name(g_p.state));
 	}
 	if (out->struct_size >= offsetof(struct xrt_tracking_provider_info, camera_key) + sizeof(out->camera_key)) {
 		ot_copy_str(out->camera_key, sizeof(out->camera_key), g_p.camera_key);
