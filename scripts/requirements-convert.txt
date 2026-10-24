@@ -1,0 +1,10 @@
+# The converter environment scripts/fetch_models.py checks against the pack's
+# conversion.versions (the ONNX bytes depend on these). Python 3.11.
+tensorflow==2.21.0
+tf2onnx==1.17.0
+onnx==1.23.2
+onnxruntime==1.31.0
+numpy==2.4.6
+protobuf==7.36.2
+flatbuffers==25.12.19
+pillow==13.0.0

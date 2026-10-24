@@ -1,6 +1,7 @@
 # Design: open camera tracking provider
 
-Status: **design, 2026-10-22.** Source of truth for the contracts it implements is the runtime
+Status: **design, 2026-10-22; viewer role implemented on macOS, 2026-10-24** (how it works,
+measurements and settings: `README.md`). Source of truth for the contracts it implements is the runtime
 repository (ADR-054 component model, ADR-034 input providers, ADR-043 stereo camera source,
 `docs/specs/runtime/input-provider-discovery.md`, and the viewer-tracking provider spec that
 ADR-054 N6 Part 2, runtime #2144, introduces).
