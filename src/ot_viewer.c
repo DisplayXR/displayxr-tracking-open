@@ -64,6 +64,7 @@ ot_viewer_update(struct ot_viewer *v,
                  struct ot_eye_estimate *est_out)
 {
 	struct ot_eye_estimate est;
+	memset(&est, 0, sizeof(est));
 	bool ok = false;
 	if (face != NULL && face->found) {
 		struct ot_face_obs obs;
