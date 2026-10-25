@@ -13,7 +13,8 @@
 #include <stdio.h>
 #include <string.h>
 
-static const char *const k_roles[OT_ROLE_COUNT] = {"face_detector", "face_landmarks"};
+static const char *const k_roles[OT_ROLE_COUNT] = {"face_detector", "face_landmarks", "hand_detector",
+                                                    "hand_landmarks"};
 
 static bool
 is_hex64(const char *s)
@@ -37,7 +38,8 @@ parse_root(const struct ot_json *root, struct ot_pack *out, char *err, size_t er
 		snprintf(err, err_size, "pack is not a JSON object");
 		return false;
 	}
-	if (strcmp(ot_json_str(root, "schema", ""), OT_PACK_SCHEMA) != 0) {
+	const char *schema = ot_json_str(root, "schema", "");
+	if (strcmp(schema, OT_PACK_SCHEMA) != 0 && strcmp(schema, OT_PACK_SCHEMA_V1) != 0) {
 		snprintf(err, err_size, "pack schema is not %s", OT_PACK_SCHEMA);
 		return false;
 	}
@@ -57,7 +59,7 @@ parse_root(const struct ot_json *root, struct ot_pack *out, char *err, size_t er
 			}
 		}
 		if (r < 0) {
-			continue; // a role a later provider version uses (hands): not ours
+			continue; // a role a later provider version uses: not ours
 		}
 		struct ot_pack_model *pm = &out->models[r];
 		const char *file = ot_json_str(m, "file", "");
@@ -94,8 +96,14 @@ parse_root(const struct ot_json *root, struct ot_pack *out, char *err, size_t er
 		pm->range_lo = (float)ot_json_at(range, 0)->number;
 		pm->range_hi = (float)ot_json_at(range, 1)->number;
 	}
+	return true;
+}
+
+bool
+ot_pack_require(const struct ot_pack *pack, uint32_t roles, char *err, size_t err_size)
+{
 	for (int i = 0; i < OT_ROLE_COUNT; i++) {
-		if (!out->models[i].present) {
+		if ((roles & (1u << i)) != 0 && !pack->models[i].present) {
 			snprintf(err, err_size, "pack has no '%s' model", k_roles[i]);
 			return false;
 		}
@@ -130,9 +138,15 @@ ot_pack_load(const char *path, struct ot_pack *out, char *err, size_t err_size)
 }
 
 bool
-ot_pack_check_files(const struct ot_pack *pack, const char *dir, bool hash, char *err, size_t err_size)
+ot_pack_check_files(const struct ot_pack *pack, uint32_t roles, const char *dir, bool hash, char *err, size_t err_size)
 {
+	if (!ot_pack_require(pack, roles, err, err_size)) {
+		return false;
+	}
 	for (int i = 0; i < OT_ROLE_COUNT; i++) {
+		if ((roles & (1u << i)) == 0) {
+			continue;
+		}
 		const struct ot_pack_model *m = &pack->models[i];
 		char path[4096];
 		snprintf(path, sizeof(path), "%s%c%s", dir, OT_PATH_SEP, m->file);

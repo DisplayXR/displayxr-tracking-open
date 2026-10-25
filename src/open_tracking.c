@@ -530,7 +530,7 @@ worker(void *arg)
 
 	set_state(OT_STATE_STARTING, "loading models");
 	struct ot_pack pack;
-	if (!load_pack(c, &pack, err, sizeof(err)) || !ot_pack_check_files(&pack, c->model_dir, true, err, sizeof(err))) {
+	if (!load_pack(c, &pack, err, sizeof(err)) || !ot_pack_check_files(&pack, OT_ROLES_FACE, c->model_dir, true, err, sizeof(err))) {
 		set_state(OT_STATE_MODELS_MISSING, "%s", err);
 		return;
 	}
@@ -706,7 +706,7 @@ ot_probe(struct xrt_tracking_plugin_instance **out_inst)
 	read_config(&c);
 	char err[512];
 	struct ot_pack pack;
-	if (!load_pack(&c, &pack, err, sizeof(err)) || !ot_pack_check_files(&pack, c.model_dir, false, err, sizeof(err))) {
+	if (!load_pack(&c, &pack, err, sizeof(err)) || !ot_pack_check_files(&pack, OT_ROLES_FACE, c.model_dir, false, err, sizeof(err))) {
 		log_line("declined: models missing: %s", err);
 		return XRT_ERROR_PROBER_NOT_SUPPORTED;
 	}
