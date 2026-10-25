@@ -26,6 +26,10 @@ struct ot_capture
 	float fps;
 	bool is_file;
 	void *impl;
+	// Process-wide sharing (ot_capture_common.c): one stream per device, reference-counted.
+	char locator[1024];
+	uint32_t refs;
+	struct ot_capture *next_shared;
 };
 
 //! A capture with a mailbox; the backend fills ops / impl / mode.

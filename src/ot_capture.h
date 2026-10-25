@@ -13,8 +13,15 @@
  *    the fake-host tests. Never a default.
  *
  * Frames are kept in the process (never written anywhere). The backend copies
- * each frame into a latest-wins mailbox; the provider's thread takes the
- * newest one, so a slow inference drops frames instead of queueing them.
+ * each frame into a latest-wins mailbox; each consumer takes the newest one,
+ * so a slow inference drops frames instead of queueing them.
+ *
+ * One stream per device per process: a second ot_capture_open of the same
+ * device (the hands role beside the viewer role, in one process) returns the
+ * SAME capture with a reference added, and ot_capture_close drops one. Every
+ * consumer sees every frame (each ot_frame_buffer remembers which it took
+ * last); the first opener's mode wins. So the two roles light one camera and
+ * one privacy indicator, and each runs its own inference on the frames.
  * Timestamps are the CAPTURE time in the runtime's monotonic domain
  * (ot_monotonic_ns), not the arrival time.
  */
@@ -105,6 +112,7 @@ ot_capture_request_access(uint32_t timeout_ms, volatile bool *cancel);
  * Streaming.
  */
 
+//! Open @p cam, or add a reference to the stream this process already has on it.
 bool
 ot_capture_open(const struct ot_camera_info *cam,
                 const struct ot_capture_request *req,
@@ -127,6 +135,7 @@ ot_capture_take(struct ot_capture *c, struct ot_frame_buffer *buf, uint32_t time
 bool
 ot_capture_lost(const struct ot_capture *c);
 
+//! Drop one reference; the stream stops with the last.
 void
 ot_capture_close(struct ot_capture *c);
 
