@@ -107,6 +107,9 @@ uint32_t
 ot_session_output_count(const struct ot_session *s);
 size_t
 ot_session_output_elems(const struct ot_session *s, uint32_t i);
+//! The graph's name of output @p i ("" when out of range).
+const char *
+ot_session_output_name(const struct ot_session *s, uint32_t i);
 
 /*!
  * Run: @p nhwc is the input (its shape is the session's), each output @p i is

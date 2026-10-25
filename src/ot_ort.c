@@ -400,6 +400,12 @@ ot_session_output_elems(const struct ot_session *s, uint32_t i)
 	return (s != NULL && i < s->out_count) ? s->out_elems[i] : 0;
 }
 
+const char *
+ot_session_output_name(const struct ot_session *s, uint32_t i)
+{
+	return (s != NULL && i < s->out_count && s->out_names[i] != NULL) ? s->out_names[i] : "";
+}
+
 bool
 ot_session_run(struct ot_session *s, const float *nhwc, float *const *outs, const size_t *caps, char *err, size_t err_size)
 {
