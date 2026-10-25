@@ -1,14 +1,25 @@
 {
-  "schema": "displayxr-tracking-pack-1",
+  "schema": "displayxr-tracking-pack-2",
   "name": "open-tracking-default",
-  "version": "1.0.0",
-  "source": {
-    "name": "MediaPipe Face Landmarker",
-    "url": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-    "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
-    "size": 3758596,
-    "license": "Apache-2.0"
-  },
+  "version": "1.1.0",
+  "sources": [
+    {
+      "name": "face_landmarker",
+      "title": "MediaPipe Face Landmarker",
+      "url": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+      "size": 3758596,
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "hand_landmarker",
+      "title": "MediaPipe Hand Landmarker",
+      "url": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1",
+      "size": 7819105,
+      "license": "Apache-2.0"
+    }
+  ],
   "conversion": {
     "script": "scripts/fetch_models.py",
     "opset": 17,
@@ -26,6 +37,7 @@
     {
       "role": "face_detector",
       "name": "BlazeFace short range",
+      "source": "face_landmarker",
       "from": "face_detector.tflite",
       "from_sha256": "b4578f35940bf5a1a655214a1cce5cab13eba73c1297cd78e1a04c2380b0152f",
       "file": "face_detector.onnx",
@@ -46,6 +58,7 @@
     {
       "role": "face_landmarks",
       "name": "Face Mesh V2 (478 landmarks incl. irises)",
+      "source": "face_landmarker",
       "from": "face_landmarks_detector.tflite",
       "from_sha256": "c7d54204ce0448474c7f3fa9af494787c0965cbdd6f20fc72867e43046bd43d5",
       "file": "face_landmarks.onnx",
@@ -62,6 +75,48 @@
       },
       "license": "Apache-2.0",
       "model_card": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf"
+    },
+    {
+      "role": "hand_detector",
+      "name": "Palm detection (full)",
+      "source": "hand_landmarker",
+      "from": "hand_detector.tflite",
+      "from_sha256": "945f713bc23570bd4ed60f848c401dc8eaf95713183d43ba14cf12e467d27a7d",
+      "file": "hand_detector.onnx",
+      "sha256": "0e3025aa86628bca10cf7a9f57fe2bbf6ff831cd462fe16356e35975fd078269",
+      "size": 4545442,
+      "input": {
+        "width": 192,
+        "height": 192,
+        "layout": "NHWC",
+        "range": [
+          0,
+          1
+        ]
+      },
+      "license": "Apache-2.0",
+      "model_card": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Hand%20Tracking%20(Lite_Full)%20with%20Fairness%20Oct%202021.pdf"
+    },
+    {
+      "role": "hand_landmarks",
+      "name": "Hand landmarks (full, 21 points + world landmarks + handedness)",
+      "source": "hand_landmarker",
+      "from": "hand_landmarks_detector.tflite",
+      "from_sha256": "6acda74af3fbf40e68265c20c7394b2bad81a16a481dcd79ad7a081887c3d6b9",
+      "file": "hand_landmarks.onnx",
+      "sha256": "186fefb3a095a3ad1d174d4ee67ce9c0c3d1e9710378520a5111659694a1b94a",
+      "size": 10873302,
+      "input": {
+        "width": 224,
+        "height": 224,
+        "layout": "NHWC",
+        "range": [
+          0,
+          1
+        ]
+      },
+      "license": "Apache-2.0",
+      "model_card": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Hand%20Tracking%20(Lite_Full)%20with%20Fairness%20Oct%202021.pdf"
     }
   ],
   "test_images": [
@@ -71,6 +126,14 @@
       "sha256": "a6f11efaa834706db23f275b6115058fa87fc7f14362681e6abe14e82749de3e",
       "size": 176561,
       "license": "public domain (official US-government portrait)"
+    },
+    {
+      "name": "hand",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/1/14/A_hand.jpg",
+      "sha256": "18b1fb64299ff8bfc4edce61901e481c0bd508c750005c5078db1c4bd0df4655",
+      "size": 1130212,
+      "max_side": 960,
+      "license": "CC0-1.0 (Wikimedia Commons, File:A_hand.jpg)"
     }
   ]
 }

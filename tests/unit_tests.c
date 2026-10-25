@@ -363,7 +363,7 @@ static const char *k_pack_ok =
     "\"input\":{\"width\":128,\"height\":128,\"layout\":\"NHWC\",\"range\":[-1,1]}},"
     "{\"role\":\"face_landmarks\",\"file\":\"%s\",\"sha256\":\"%s\",\"size\":20,"
     "\"input\":{\"width\":256,\"height\":256,\"layout\":\"NHWC\",\"range\":[0,1]}},"
-    "{\"role\":\"palm_detector\",\"file\":\"x.onnx\"}]}";
+    "{\"role\":\"future_role\",\"file\":\"x.onnx\"}]}";
 
 static bool
 parse_variant(const char *file2, const char *sha, char *err, size_t err_size, struct ot_pack *p)
@@ -384,13 +384,22 @@ test_pack(const char *repo_pack)
 	      "input size and range read");
 	check(!parse_variant("../b.onnx", sha, err, sizeof(err), &p), "a path in a file name is refused (%s)", err);
 	check(!parse_variant("b.onnx", "AF191C", err, sizeof(err), &p), "a malformed sha256 is refused (%s)", err);
-	const char *missing = "{\"schema\":\"displayxr-tracking-pack-1\",\"models\":[]}";
-	check(!ot_pack_parse(missing, strlen(missing), &p, err, sizeof(err)), "a missing role is refused (%s)", err);
+	check(parse_variant("b.onnx", sha, err, sizeof(err), &p) && ot_pack_require(&p, OT_ROLES_FACE, err, sizeof(err)),
+	      "the face roles are there");
+	check(!ot_pack_require(&p, OT_ROLES_HANDS, err, sizeof(err)), "the hand roles are not (%s)", err);
+	const char *missing = "{\"schema\":\"displayxr-tracking-pack-2\",\"models\":[]}";
+	check(ot_pack_parse(missing, strlen(missing), &p, err, sizeof(err)) &&
+	          !ot_pack_require(&p, OT_ROLES_FACE, err, sizeof(err)),
+	      "a pack without a needed role is refused by require (%s)", err);
 	const char *schema = "{\"schema\":\"other\",\"models\":[]}";
 	check(!ot_pack_parse(schema, strlen(schema), &p, err, sizeof(err)), "another schema is refused (%s)", err);
 	if (repo_pack != NULL) {
 		check(ot_pack_load(repo_pack, &p, err, sizeof(err)), "the repository's pack parses (%s)", err);
 		check(strcmp(p.models[OT_ROLE_FACE_DETECTOR].sha256, sha) == 0, "  detector sha256 pinned");
+		check(ot_pack_require(&p, OT_ROLES_FACE | OT_ROLES_HANDS, err, sizeof(err)), "  face + hand roles (%s)", err);
+		check(p.models[OT_ROLE_HAND_DETECTOR].width == 192 && p.models[OT_ROLE_HAND_LANDMARKS].width == 224 &&
+		          p.models[OT_ROLE_HAND_LANDMARKS].range_lo == 0.0f,
+		      "  hand model inputs 192 / 224, range [0, 1]");
 	}
 }
 
