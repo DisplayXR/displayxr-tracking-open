@@ -331,6 +331,24 @@ static ot_mutex g_hub_init_lock = OT_MUTEX_INITIALIZER;
 static bool g_hub_ready = false;
 static struct oth_hub g_h;
 static struct ot_ort *g_ort = NULL;
+static uint32_t g_live_devices = 0; //!< hand devices handed out and not yet destroyed (under g_h.lock)
+
+static void
+hub_stop(void);
+
+/*!
+ * Process exit with the worker still running: stop it before the static destructors of Core ML and
+ * ONNX Runtime tear down the sessions it is using (they were registered at load, before this, so
+ * this runs first). The runtime keeps a loaded provider for the process lifetime and never calls
+ * destroy, so without this the thread outlives the app's clean shutdown and crashes at exit.
+ */
+static void
+hub_stop_at_exit(void)
+{
+	if (g_hub_ready) {
+		hub_stop();
+	}
+}
 
 static void
 hub_init(void)
@@ -341,6 +359,7 @@ hub_init(void)
 		ot_mutex_init(&g_h.lock);
 		g_h.presence = XRT_INPUT_PROVIDER_PRESENCE_UNKNOWN;
 		g_hub_ready = true;
+		(void)atexit(hub_stop_at_exit);
 	}
 	ot_unlock(&g_hub_init_lock);
 }
@@ -1162,6 +1181,14 @@ static void
 dev_destroy(struct xrt_device *xdev)
 {
 	free(xdev);
+	// The last device gone (the app's instance torn down): nobody can locate joints any more, so stop
+	// the worker and close the camera now instead of at IDLE_S or process exit.
+	ot_lock(&g_h.lock);
+	const bool last = g_live_devices > 0 && --g_live_devices == 0;
+	ot_unlock(&g_h.lock);
+	if (last) {
+		hub_stop();
+	}
 }
 
 static struct xrt_device *
@@ -1329,6 +1356,9 @@ oth_create_devices(struct xrt_input_plugin_instance *inst,
 	out_devices[0] = l;
 	out_devices[1] = r;
 	*out_count = 2;
+	ot_lock(&g_h.lock);
+	g_live_devices += 2;
+	ot_unlock(&g_h.lock);
 	return XRT_SUCCESS;
 }
 
