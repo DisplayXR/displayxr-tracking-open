@@ -90,7 +90,10 @@ add_library(${OPENTRACK_PROVIDER} MODULE
 	src/ot_ort.c
 	${OPENTRACK_CORE_SOURCES}
 	${OPENTRACK_CAPTURE_SOURCES})
-target_include_directories(${OPENTRACK_PROVIDER} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(${OPENTRACK_PROVIDER} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# The vendored runtime headers are SYSTEM (/external:I on MSVC): they are copied verbatim and may warn
+# under this build's flags (an assert-only local in xrt_defines.h is C4189 in Release).
+target_include_directories(${OPENTRACK_PROVIDER} SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(${OPENTRACK_PROVIDER} SYSTEM PRIVATE ${OPENTRACK_ORT_INCLUDE_DIR})
 set_target_properties(${OPENTRACK_PROVIDER} PROPERTIES PREFIX "" C_VISIBILITY_PRESET hidden OBJC_VISIBILITY_PRESET hidden)
 if(APPLE)
@@ -140,7 +143,8 @@ endif()
 
 if(OPENTRACK_BUILD_TESTS OR OPENTRACK_BUILD_PROBE)
 	add_library(opentrack-fakehost-lib STATIC tools/fake_host.c src/ot_platform.c src/ot_sha256.c)
-	target_include_directories(opentrack-fakehost-lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+	target_include_directories(opentrack-fakehost-lib SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+	target_include_directories(opentrack-fakehost-lib PUBLIC
 		${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 	if(WIN32)
 		target_link_libraries(opentrack-fakehost-lib PUBLIC shell32 ole32 uuid)
@@ -162,7 +166,8 @@ if(OPENTRACK_BUILD_TESTS)
 	enable_testing()
 
 	add_executable(open-tracking-unit-tests tests/unit_tests.c ${OPENTRACK_CORE_SOURCES})
-	target_include_directories(open-tracking-unit-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+	target_include_directories(open-tracking-unit-tests SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+	target_include_directories(open-tracking-unit-tests PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/src)
 	if(WIN32)
 		target_link_libraries(open-tracking-unit-tests PRIVATE shell32 ole32 uuid)
@@ -180,7 +185,8 @@ if(OPENTRACK_BUILD_TESTS)
 	# the platform backend: no camera is ever opened).
 	add_executable(open-tracking-hand-tests tests/hand_tests.c ${OPENTRACK_CORE_SOURCES} src/ot_capture_common.c
 		src/ot_capture_file.c src/ot_capture_stub.c)
-	target_include_directories(open-tracking-hand-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
+	target_include_directories(open-tracking-hand-tests SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+	target_include_directories(open-tracking-hand-tests PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/src)
 	if(WIN32)
 		target_link_libraries(open-tracking-hand-tests PRIVATE shell32 ole32 uuid)
