@@ -66,7 +66,8 @@ host_get_setting(const char *id, const char *key, char *buf, uint32_t buf_size)
 		return false;
 	}
 	buf[0] = '\0';
-	if (strcmp(id, "open-tracking") != 0) {
+	// Both roles' ids; a --set applies to whichever role reads it.
+	if (strcmp(id, "open-tracking") != 0 && strcmp(id, "open-tracking-hands") != 0) {
 		return false;
 	}
 	if (g_cfg.env_prefix != NULL) {
@@ -123,7 +124,22 @@ host_get_camera_pose(const void *host, const char *camera_key, const char *scree
 	return XRT_SUCCESS;
 }
 
+static xrt_result_t
+host_get_input_display_geometry(struct xrt_input_host_display_geometry *inout)
+{
+	if (inout == NULL || inout->struct_size < sizeof(*inout)) {
+		return XRT_ERROR_INPUT_UNSUPPORTED;
+	}
+	inout->display_width_m = g_cfg.panel_w_m;
+	inout->display_height_m = g_cfg.panel_h_m;
+	inout->nominal_viewer_x_m = 0.0f;
+	inout->nominal_viewer_y_m = 0.0f;
+	inout->nominal_viewer_z_m = g_cfg.nominal_z_m;
+	return XRT_SUCCESS;
+}
+
 static struct xrt_tracking_plugin_host_iface g_host;
+static struct xrt_input_plugin_host_iface g_input_host;
 
 static void
 sink_push(const struct xrt_tracking_sink *sink, const struct xrt_tracking_viewer_sample *sample)
@@ -186,6 +202,50 @@ void
 fh_sleep_ms(uint32_t ms)
 {
 	ot_sleep_ms(ms);
+}
+
+static void *
+load_lib(const char *path)
+{
+	char err[512];
+	void *lib = ot_lib_open(path, err, sizeof(err));
+	if (lib == NULL) {
+		fprintf(stderr, "fake host: cannot load %s: %s\n", path, err);
+	}
+	return lib;
+}
+
+xrt_result_t
+fh_load_input(const char *path,
+              const struct fh_config *cfg,
+              uint32_t api_version,
+              struct xrt_input_plugin_iface **out_iface)
+{
+	if (!g_lock_ready) {
+		ot_mutex_init(&g_lock);
+		g_lock_ready = true;
+	}
+	g_cfg = *cfg;
+	memset(&g_input_host, 0, sizeof(g_input_host));
+	g_input_host.struct_size = (uint32_t)sizeof(g_input_host);
+	g_input_host.host_api_version = api_version;
+	g_input_host.get_display_geometry = host_get_input_display_geometry;
+	g_input_host.get_setting = host_get_setting;
+	g_input_host.get_camera_pose = cfg->no_pose_slot ? NULL : host_get_camera_pose;
+
+	void *lib = load_lib(path);
+	if (lib == NULL) {
+		return XRT_ERROR_ALLOCATION;
+	}
+	xrt_input_plugin_negotiate_fn_t negotiate =
+	    (xrt_input_plugin_negotiate_fn_t)ot_lib_sym(lib, XRT_INPUT_PLUGIN_ENTRYPOINT_NAME);
+	if (negotiate == NULL) {
+		fprintf(stderr, "fake host: %s exports no %s\n", path, XRT_INPUT_PLUGIN_ENTRYPOINT_NAME);
+		return XRT_ERROR_ALLOCATION;
+	}
+	uint32_t plugin_version = 0;
+	*out_iface = NULL;
+	return negotiate(api_version, &g_input_host, out_iface, &plugin_version);
 }
 
 xrt_result_t
