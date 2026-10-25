@@ -34,11 +34,13 @@ typedef SRWLOCK ot_mutex;
 typedef CONDITION_VARIABLE ot_cond;
 typedef HANDLE ot_thread;
 #define OT_PATH_SEP '\\'
+#define OT_MUTEX_INITIALIZER SRWLOCK_INIT //!< a statically initialised ot_mutex (never destroyed)
 #else
 typedef pthread_mutex_t ot_mutex;
 typedef pthread_cond_t ot_cond;
 typedef pthread_t ot_thread;
 #define OT_PATH_SEP '/'
+#define OT_MUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER //!< a statically initialised ot_mutex (never destroyed)
 #endif
 
 void
@@ -52,6 +54,7 @@ ot_mutex_destroy(ot_mutex *m);
 
 void
 ot_cond_init(ot_cond *c);
+//! Wake EVERY waiter (a shared camera has one waiter per consumer).
 void
 ot_cond_signal(ot_cond *c);
 //! Wait on @p c (with @p m held) at most @p timeout_ms. False on timeout.
