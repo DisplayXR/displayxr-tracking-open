@@ -60,10 +60,12 @@ static const struct xrt_component_setting_desc g_descs[] = {
      "the camera's horizontal field of view in degrees (10..170): sets the focal length, so the distance "
      "scales with it"},
     {"MIRROR", XRT_COMPONENT_SETTING_TYPE_BOOL, "0", "1: the camera delivers a mirrored image"},
-    {"EP", XRT_COMPONENT_SETTING_TYPE_ENUM, "auto", "auto | cpu | coreml (auto = Core ML on macOS, else CPU)"},
+    {"EP", XRT_COMPONENT_SETTING_TYPE_ENUM, "cpu",
+     "cpu | coreml (macOS; auto = cpu). CPU by default: the Neural Engine runs half precision and its eye "
+     "depth jitters about 10x more on a still face"},
     {"COREML_UNITS", XRT_COMPONENT_SETTING_TYPE_ENUM, "ane",
-     "ane | gpu | all | cpu: Core ML compute units. ane (CPU + Neural Engine) by default: the lowest CPU "
-     "cost, and it leaves the GPU to the renderer"},
+     "ane | gpu | all | cpu: Core ML compute units (EP=coreml). ane (CPU + Neural Engine) by default: the "
+     "lowest CPU cost, and it leaves the GPU to the renderer"},
     {"COREML_CACHE", XRT_COMPONENT_SETTING_TYPE_BOOL, "1",
      "1: keep Core ML's compiled models in the user cache directory (the compile is then one-time)"},
     {"CACHE_DIR", XRT_COMPONENT_SETTING_TYPE_STRING, "",
@@ -268,7 +270,7 @@ read_config(struct ot_config *c)
 	}
 	c->mirror = setting_bool("MIRROR", false);
 	if (!setting("EP", c->ep, sizeof(c->ep))) {
-		ot_copy_str(c->ep, sizeof(c->ep), "auto");
+		ot_copy_str(c->ep, sizeof(c->ep), "cpu");
 	}
 	char v[32];
 	c->units = OT_COREML_ANE;
@@ -318,6 +320,8 @@ struct ot_stats
 	int64_t since_ns;
 	uint32_t frames, faces, detects;
 	double det_ms, lm_ms, crop_ms, proc_ms, lat_ms, lat_max_ms;
+	double stamp_ms;      //!< capture stamp -> the backend's arrival (the camera + driver)
+	double wait_ms;       //!< arrival -> processing starts (the mailbox)
 	double luma;          //!< sum of per-frame mean luma (0..255)
 	float best_det_score; //!< the best detector score seen in the window
 	float presence_min;   //!< the lowest landmark presence while a face was followed
@@ -348,11 +352,12 @@ stats_flush(struct ot_stats *st, const char *ep)
 	const double secs = (double)(ot_monotonic_ns() - st->since_ns) * 1e-9;
 	if (st->frames > 0 && secs > 0) {
 		log_line("stats %s: %.1f fps analysed, face %u/%u, detector %u x %.2f ms, landmarks %.2f ms, (crops %.2f "
-		         "ms), frame %.2f ms, capture->push %.1f ms (max %.1f); frame luma %.0f, best detector score %.2f",
+		         "ms), frame %.2f ms, capture->push %.1f ms (max %.1f) = stamp->arrival %.1f + arrival->process %.1f + "
+		         "process; frame luma %.0f, best detector score %.2f",
 		         ep, st->frames / secs, st->faces, st->frames, st->detects,
 		         st->detects > 0 ? st->det_ms / st->detects : 0.0, st->lm_ms / st->frames, st->crop_ms / st->frames,
 		         st->proc_ms / st->frames, st->faces > 0 ? st->lat_ms / st->faces : 0.0, st->lat_max_ms,
-		         st->luma / st->frames, (double)st->best_det_score);
+		         st->stamp_ms / st->frames, st->wait_ms / st->frames, st->luma / st->frames, (double)st->best_det_score);
 	}
 	memset(st, 0, sizeof(*st));
 	st->since_ns = ot_monotonic_ns();
@@ -468,7 +473,7 @@ create_tracker(const struct ot_config *c, const struct ot_pack *pack, bool force
 	char err[512];
 	bool want_coreml = false;
 #ifdef __APPLE__
-	want_coreml = !force_cpu && strcmp(c->ep, "cpu") != 0 && ot_ort_has_coreml(g_ort);
+	want_coreml = !force_cpu && strcmp(c->ep, "coreml") == 0 && ot_ort_has_coreml(g_ort);
 #else
 	(void)force_cpu;
 	if (strcmp(c->ep, "coreml") == 0) {
@@ -632,6 +637,8 @@ worker(void *arg)
 		stats.lm_ms += face.ms_landmarks;
 		stats.crop_ms += face.ms_crop;
 		stats.proc_ms += (double)(now - proc0) * 1e-6;
+		stats.stamp_ms += (double)(fb.frame.arrival_ns - fb.frame.capture_ns) * 1e-6;
+		stats.wait_ms += (double)(proc0 - fb.frame.arrival_ns) * 1e-6;
 		if (c->stats_s > 0) {
 			stats.luma += mean_luma(&fb.frame.image);
 			stats.best_det_score =

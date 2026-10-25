@@ -107,7 +107,7 @@ string from that process's Info.plist:
 Per analysed frame in tracking mode (no detector), from the provider's `STATS_S` log, the file
 camera replaying a portrait (so the face never moves); load average 3–5 from unrelated work.
 
-| | Core ML, Neural Engine (default) | Core ML, GPU | CPU EP (2 threads) |
+| | Core ML, Neural Engine | Core ML, GPU | CPU EP (2 threads, default) |
 |---|---|---|---|
 | landmarks incl. crop | 7.4 ms | 8.3 ms | 4.9 ms |
 | capture → push | 8.0 ms | 9.0 ms | 5.0 ms |
@@ -115,9 +115,22 @@ camera replaying a portrait (so the face never moves); load average 3–5 from u
 | sessions ready, first / cached | 612 / 74 ms | 430 ms / — | — |
 
 The detector alone: 2–4 ms (Core ML), 3 ms (CPU). Both execution providers take every node of both
-models in one partition. The Neural Engine is the default: about 5× less CPU than the CPU
-execution provider and it leaves the GPU to the renderer, at a latency well inside the 25 ms
-budget. `EP=cpu` is the low-latency choice. Live-camera numbers: see the pull request.
+models in one partition. The CPU execution provider is the default. On a live face held still at
+50 cm, the Neural Engine's eye depth jitters 5–6 mm (standard deviation) against 0.4–0.7 mm on
+the CPU, because the Neural Engine runs half precision; sideways and vertical jitter are
+0.4–0.6 mm against 0.2–0.3 mm. `EP=coreml` (Neural Engine) costs about 5× less CPU and leaves
+the GPU to the renderer, when that matters more than depth noise. Live-camera numbers: see the
+pull request.
+
+Camera latency. On a built-in laptop camera the frame reaches the provider 70–150 ms after its
+capture stamp, while processing takes about 5 ms. The delay sits in the operating system's camera
+stack, not in this provider. A bare capture session with no processing shows the same delay, and a
+screen-flash test puts the stamp itself 35–80 ms after the light change, which is one frame plus
+the display. The delay is a sawtooth with a period of about 20 s (buffering drifting against the
+sensor rate). Locking the frame rate, a smaller preset or another pixel format does not remove it.
+Each sample carries the capture stamp, so the runtime can predict across the delay. The `STATS_S`
+log splits it: `stamp->arrival` (the camera stack), `arrival->process` (this provider's mailbox)
+and the processing time.
 
 ## Model pack
 
@@ -192,7 +205,7 @@ open-tracking` lists them.
 | `WIDTH`, `HEIGHT`, `FPS` | 1280, 720, 30 | the best mode at or below |
 | `HFOV_DEG` | 70 | the camera's horizontal field of view; the distance scales with it. Measure it once: at distance D, the visible width W gives `2·atan(W / 2D)` |
 | `MIRROR` | 0 | the camera mirrors its image |
-| `EP` | auto | `auto` (Core ML on macOS, else CPU), `coreml`, `cpu` |
+| `EP` | cpu | `cpu`, `coreml` (macOS; Neural Engine by default, see `COREML_UNITS`) |
 | `COREML_UNITS` | ane | `ane`, `gpu`, `all`, `cpu` |
 | `COREML_CACHE`, `CACHE_DIR` | 1, user cache | compiled Core ML models under `~/Library/Caches/DisplayXR/OpenTracking/coreml-ort-<v>/<blob>` |
 | `MODEL_DIR`, `ONNXRUNTIME` | next to the binary | |
