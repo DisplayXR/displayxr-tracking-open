@@ -6,7 +6,14 @@
  *         and print what it publishes. A developer tool.
  *
  *     otr-probe [--provider PATH] [--seconds N] [--still S] [--set KEY=VALUE]...
- *               [--panel WxH] [--iris-scale X] [--quiet]
+ *               [--panel WxH] [--iris-scale X] [--quiet] [--hands]
+ *
+ * --hands runs the HANDS role instead (the input provider): it creates the two
+ * hand devices and locates their joints at 30 Hz, as an app's xrLocateHandJointsEXT
+ * would, and prints every second each hand's share of active locates, its palm
+ * and wrist in display space, its camera distance, its size and the pinch
+ * distance; at the end the palm jitter over the last S seconds. Settings then
+ * also come from DXR_INPUT_OPEN_TRACKING_HANDS_<KEY>.
  *
  * Every second: samples/s, tracking share, capture -> push latency (median,
  * max), the eyes in display space, each eye's camera-space distance, the eye
@@ -21,6 +28,8 @@
 #include "fake_host.h"
 #include "ot_platform.h"
 
+#include "xrt/xrt_device.h"
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,12 +42,133 @@ cmp_double(const void *a, const void *b)
 	return x < y ? -1 : x > y;
 }
 
+static float
+vdist(const struct xrt_vec3 *a, const struct xrt_vec3 *b)
+{
+	const float x = a->x - b->x, y = a->y - b->y, z = a->z - b->z;
+	return sqrtf(x * x + y * y + z * z);
+}
+
+//! The hands role on a real camera: joint locates at 30 Hz through the devices.
+static int
+run_hands(const char *provider, struct fh_config *cfg, double seconds, double still, bool quiet)
+{
+	struct xrt_input_plugin_iface *it = NULL;
+	if (fh_load_input(provider, cfg, XRT_INPUT_PLUGIN_API_VERSION_CURRENT, &it) != XRT_SUCCESS || it == NULL) {
+		fprintf(stderr, "cannot load / negotiate the hands role of %s\n", provider);
+		return 2;
+	}
+	struct xrt_input_plugin_instance *inst = NULL;
+	const int64_t tp = fh_now_ns();
+	if (it->probe(&inst) != XRT_SUCCESS) {
+		fprintf(stderr, "probe declined (see the [open-tracking-hands] line above)\n");
+		return 3;
+	}
+	printf("probe: usable (%.1f ms)\n", (double)(fh_now_ns() - tp) * 1e-6);
+	struct xrt_device *dev[XRT_INPUT_PLUGIN_MAX_DEVICES] = {0};
+	uint32_t n = 0;
+	if (it->create_devices(inst, dev, XRT_INPUT_PLUGIN_MAX_DEVICES, &n) != XRT_SUCCESS || n < 2) {
+		fprintf(stderr, "create_devices failed\n");
+		return 3;
+	}
+	const enum xrt_input_name names[2] = {XRT_INPUT_HT_UNOBSTRUCTED_LEFT, XRT_INPUT_HT_UNOBSTRUCTED_RIGHT};
+	const char *side_name[2] = {"L", "R"};
+	enum
+	{
+		HIST = 4096
+	};
+	static struct xrt_vec3 hist[2][HIST];
+	static int64_t hist_t[2][HIST];
+	uint32_t hn[2] = {0, 0};
+	const int64_t run0 = fh_now_ns();
+	int64_t next_print = run0 + 1000000000LL;
+	uint32_t locates = 0, active[2] = {0, 0};
+	struct xrt_hand_joint_set js[2];
+	while (fh_now_ns() - run0 < (int64_t)(seconds * 1e9)) {
+		const int64_t at = fh_now_ns();
+		for (int s = 0; s < 2; s++) {
+			int64_t ts = 0;
+			dev[s]->get_hand_tracking(dev[s], names[s], at, &js[s], &ts);
+			if (js[s].is_active) {
+				active[s]++;
+				if (hn[s] < HIST) {
+					hist[s][hn[s]] = js[s].values.hand_joint_set_default[XRT_HAND_JOINT_PALM].relation.pose.position;
+					hist_t[s][hn[s]++] = at;
+				}
+			}
+		}
+		locates++;
+		if (fh_now_ns() >= next_print) {
+			next_print += 1000000000LL;
+			if (!quiet) {
+				printf("t=%5.1fs", (double)(fh_now_ns() - run0) * 1e-9);
+				for (int s = 0; s < 2; s++) {
+					const struct xrt_hand_joint_value *v = js[s].values.hand_joint_set_default;
+					if (!js[s].is_active) {
+						printf("  %s: -- (%3u%%)", side_name[s], active[s] * 100u / (locates ? locates : 1));
+						continue;
+					}
+					const struct xrt_vec3 *palm = &v[XRT_HAND_JOINT_PALM].relation.pose.position;
+					const struct xrt_vec3 *wrist = &v[XRT_HAND_JOINT_WRIST].relation.pose.position;
+					printf("  %s: %3u%% palm(%+.3f %+.3f %.3f) wrist(%+.3f %+.3f %.3f) size %.0f mm pinch %.0f mm",
+					       side_name[s], active[s] * 100u / (locates ? locates : 1), palm->x, palm->y, palm->z,
+					       wrist->x, wrist->y, wrist->z,
+					       vdist(wrist, &v[XRT_HAND_JOINT_MIDDLE_PROXIMAL].relation.pose.position) * 1000.0f,
+					       vdist(&v[XRT_HAND_JOINT_THUMB_TIP].relation.pose.position,
+					             &v[XRT_HAND_JOINT_INDEX_TIP].relation.pose.position) *
+					           1000.0f);
+				}
+				printf("\n");
+			}
+			locates = 0;
+			active[0] = active[1] = 0;
+		}
+		fh_sleep_ms(33);
+	}
+	for (int s = 0; s < 2; s++) {
+		dev[s]->destroy(dev[s]);
+	}
+	it->destroy(inst);
+
+	// Palm jitter over the last `still` seconds, per hand.
+	const int64_t end = fh_now_ns();
+	for (int s = 0; s < 2; s++) {
+		double sum[3] = {0}, sq[3] = {0};
+		uint32_t m = 0;
+		for (uint32_t i = 0; i < hn[s]; i++) {
+			if (end - hist_t[s][i] > (int64_t)(still * 1e9)) {
+				continue;
+			}
+			const float p[3] = {hist[s][i].x, hist[s][i].y, hist[s][i].z};
+			for (int c = 0; c < 3; c++) {
+				sum[c] += p[c];
+				sq[c] += (double)p[c] * p[c];
+			}
+			m++;
+		}
+		if (m < 2) {
+			printf("%s hand: not enough active locates in the last %.1f s\n", side_name[s], still);
+			continue;
+		}
+		double sd[3], mean[3];
+		for (int c = 0; c < 3; c++) {
+			mean[c] = sum[c] / m;
+			const double v = sq[c] / m - mean[c] * mean[c];
+			sd[c] = sqrt(v > 0 ? v : 0) * 1000.0;
+		}
+		printf("%s hand, last %.1f s, %u active locates: palm mean (%+.4f, %+.4f, %.4f) m, std dev x %.2f y %.2f "
+		       "z %.2f mm\n",
+		       side_name[s], still, m, mean[0], mean[1], mean[2], sd[0], sd[1], sd[2]);
+	}
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
 	char provider[4096] = "";
 	double seconds = 10.0, still = 3.0;
-	bool quiet = false;
+	bool quiet = false, hands = false;
 	struct fh_config cfg;
 	fh_config_defaults(&cfg);
 	cfg.env_prefix = "DXR_TRACKING_OPEN_TRACKING_";
@@ -67,10 +197,12 @@ main(int argc, char **argv)
 			cfg.iris_scale = (float)atof(argv[++i]);
 		} else if (strcmp(argv[i], "--quiet") == 0) {
 			quiet = true;
+		} else if (strcmp(argv[i], "--hands") == 0) {
+			hands = true;
 		} else {
 			fprintf(stderr,
 			        "usage: %s [--provider PATH] [--seconds N] [--still S] [--set KEY=VALUE]... [--panel WxH] "
-			        "[--iris-scale X] [--quiet]\n",
+			        "[--iris-scale X] [--quiet] [--hands]\n",
 			        argv[0]);
 			return 2;
 		}
@@ -88,6 +220,11 @@ main(int argc, char **argv)
 #else
 		snprintf(provider, sizeof(provider), "%s/DisplayXR-OpenTracking.so", dir);
 #endif
+	}
+
+	if (hands) {
+		cfg.env_prefix = "DXR_INPUT_OPEN_TRACKING_HANDS_";
+		return run_hands(provider, &cfg, seconds, still, quiet);
 	}
 
 	struct xrt_tracking_plugin_iface *it = NULL;

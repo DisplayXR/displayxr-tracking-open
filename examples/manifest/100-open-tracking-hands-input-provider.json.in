@@ -1,0 +1,15 @@
+{
+    "file_format_version": "1.0",
+    "plugin": {
+        "id":           "open-tracking-hands",
+        "display_name": "DisplayXR Open Tracking: hands",
+        "vendor":       "DisplayXR",
+        "version":      "0.2.0",
+        "binary_path":  "@OPENTRACK_BINARY@",
+        "probe_order":  100,
+        "enabled":      true,
+        "settings": {
+            "HFOV_DEG": "70"
+        }
+    }
+}

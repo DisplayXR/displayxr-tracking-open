@@ -1,7 +1,8 @@
 # Design: open camera tracking provider
 
-Status: **design, 2026-10-22; viewer role implemented on macOS, 2026-10-24** (how it works,
-measurements and settings: `README.md`). Source of truth for the contracts it implements is the runtime
+Status: **design, 2026-10-22; viewer role implemented on macOS, 2026-10-24; hands role
+implemented (webcam path, macOS capture), 2026-10-25, §11** (how it works, measurements and
+settings: `README.md`). Source of truth for the contracts it implements is the runtime
 repository (ADR-054 component model, ADR-034 input providers, ADR-043 stereo camera source,
 `docs/specs/runtime/input-provider-discovery.md`, and the viewer-tracking provider spec that
 ADR-054 N6 Part 2, runtime #2144, introduces).
@@ -20,7 +21,13 @@ It registers as two components, so each role is enabled, preferred and shown sep
 same binary; the runtime starts one process, which serves whichever roles are wanted.
 
 Why one process: both roles need the same frames. Two processes would contend for one camera and
-light two privacy indicators.
+light two privacy indicators. **As built (§11.1):** both entry points live in one binary, and
+within a process the capture layer keeps one stream per device that both roles subscribe to.
+Whether the runtime puts both roles in one process is the runtime's hosting decision: today an
+in-process app loads both into itself (one stream), while under the service the viewer role runs
+in `displayxr-tracking-host` and input providers in `displayxr-service`, so each opens its own
+stream on the same device (macOS allows concurrent capture from two processes; Windows Media
+Foundation generally does not) — see §11.7.
 
 ## 2. Who wins
 
@@ -69,7 +76,8 @@ The viewer role uses only (2): it is only ever active on a screen whose display 
 and such a display has no shared tracker stream.
 
 Streams open **on demand** — the viewer role when a session is running on a screen it serves, the
-hands role when an app creates a hand tracker — and close when demand ends. Hold **one** stream
+hands role when an app locates hand joints (the input-provider ABI has no "tracker created"
+signal, so the first `get_hand_tracking` is the demand; §11.5) — and close when demand ends. Hold **one** stream
 per demand window (each stream start raises the runtime's camera-in-use notice). On a shared
 display camera the role must tolerate `WAITING` with no frames and report it (§5).
 
@@ -143,9 +151,11 @@ why — so the Dashboard and MCP read one snapshot.
   landmarks, detection only on loss, left/right hand association, temporal filtering.
 - Metric head distance from iris diameter (about 11.7 mm across people) and the camera's field of
   view; camera placement assumed top-centre of the bezel, corrected by a one-step calibration.
-- Hands from a webcam map into display space the same relative way as dedicated hand sensors
-  (anchor + gain), because the webcam's pose relative to the display is not known until
-  calibrated (§10).
+- Hands from a webcam are published **display-plane relative** (`RIG_LOCAL`, the frame the
+  runtime's scripted hands use), mapped through the camera's pose: the runtime's
+  `get_camera_pose` answer, which is the top-centre-of-the-bezel prior until the user calibrates
+  (§10) and the calibrated pose after. Metric, with no anchor or gain; the depth is a hand-size
+  estimate (§11.3). (This replaces an earlier "anchor + gain" plan.)
 - Hands from a shared display camera: the stream carries intrinsics and the stereo pose but not
   the camera's pose in display space. Proposed (runtime): an append-only ADR-043 field "camera
   pose in display space" that the display plug-in fills. With it, shared-camera hands are metric
@@ -250,3 +260,121 @@ stays "dumb" (ADR-051 D4: it links no runtime code and only drives `displayxr-cl
 
 The method and solver belong to the tracking class, not to this provider: any provider that
 reports camera-space eye points gets calibration for free.
+
+## 11. Hands role (as built)
+
+The input provider `open-tracking-hands` (`xrtInputPluginNegotiate`, input ABI 1), in the same
+binary as the viewer role.
+
+### 11.1 One camera, two roles
+
+- `ot_capture_open` keeps a process-wide table of open streams keyed by the device's locator. A
+  second open of the same device returns the same stream with a reference added; the last close
+  stops it. The mailbox is latest-wins per consumer (each frame buffer remembers the last frame it
+  took) and wakes every waiter, so both roles see every frame and run their own inference on it,
+  each on its own thread with its own ONNX Runtime sessions. A slow role drops frames; it never
+  delays the other.
+- The first opener's mode (size, rate) wins. Both roles read their own settings, so `DEVICE` (and
+  `HFOV_DEG`) should match; a different `DEVICE` opens a second camera.
+- Hands could run at a lower rate than the viewer; on Apple Silicon one hand costs about a frame's
+  budget on the CPU and half on Core ML (README), so the role runs every frame it gets.
+
+### 11.2 Inference
+
+The face role's shape: the palm detector (full, 192², letterboxed) only when fewer hands are
+followed than `MAX_HANDS` — every frame with none, every `DETECT_EVERY` frames with one — then the
+hand-landmark model (full, 224²) per hand on a rotated crop. The crop comes from a palm detection
+(rotation wrist → middle knuckle upright, the box moved half its height toward the fingers, its
+long side × 2.6) or, in tracking mode, from the previous frame's landmarks (wrist → the mean of
+the index / middle / ring knuckles upright, the palm landmarks' box moved 0.1 × its height
+toward the fingers, long side × 2). A presence below `PRESENCE_MIN` drops the hand; two tracks on
+one hand (ROI overlap > 0.5) keep the more confident; a detection overlapping a followed hand is
+skipped. The model's outputs, identified by name: 21 landmarks in crop px, presence, handedness,
+and 21 "world" landmarks (metric, about the hand's centre, crop axes).
+
+**Handedness.** The handedness output is P(the subject's right hand) for an **un-mirrored**
+image. Established on a CC0 photo of a left hand showing its palm (score 0.10; 0.92 mirrored) and
+cross-checked against the 3D shape's chirality (`ot_hand_chirality`: the knuckle-plane normal
+index × little points to the palm side for a right hand; the palm side is where the fingers bend).
+The capture forces mirroring off and the sampler un-mirrors a `MIRROR=1` camera, so the model
+always sees an un-mirrored image. Per track the score is averaged (the newest 30 frames); with two
+hands the more "right" one is right, with one the threshold is 0.5.
+
+### 11.3 Depth (monocular, honest)
+
+The world landmarks give the hand's metric shape, from the model's learned average hand. The
+provider finds the translation `T` that puts every shape point + `T` closest to its landmark's
+pixel ray (linear least squares, `ot_hand_place`), then places each landmark on its own ray at the
+depth of shape + `T`, so the result reprojects exactly onto the 2D landmarks. The depth is
+therefore a **hand-size estimate**: a hand 10 % larger than the model's average reads 10 % farther.
+`HAND_SCALE` corrects it per user (the hands' analogue of the viewer's iris scale; a calibration
+step for it is open). The focal length comes from `HFOV_DEG` × the camera pose's focal scale.
+
+### 11.4 Joints, frames, devices
+
+- **21 → 26.** The 20 measured joints map one to one (thumb CMC / MCP / IP / tip → metacarpal /
+  proximal / distal / tip; each finger's MCP / PIP / DIP / tip → proximal / intermediate /
+  distal / tip; wrist → wrist). Synthesised: each finger's metacarpal joint a quarter of the way
+  from the wrist to its knuckle (the carpometacarpal joint the model does not output), the palm at
+  the middle of the middle finger's metacarpal bone, as the extension defines it.
+- **Orientation.** -Z along the bone that starts at the joint (tips: the last bone; wrist and palm:
+  toward the middle knuckle), +Y out of the back of the hand (from the knuckle plane and the
+  handedness), X = Y × Z. The thumb uses the hand's back as its up vector, an approximation.
+- **Radii.** A nominal adult hand's (fingertips 6–8 mm, palm 16 mm, wrist 20 mm), scaled by the
+  measured wrist → middle-knuckle length.
+- **Filtering.** One Euro per coordinate of the 21 points in display space, restarted on a new
+  track or a gap over 300 ms.
+- **Frame.** `XRT_TRACKING_TYPE_RIG_LOCAL`: display centre, +X right, +Y up, +Z toward the viewer.
+  `display = T + R · p` with the camera's pose; the runtime anchors the origin at the initial rig,
+  so the hands follow voluntary rig motion and never the viewer's head parallax (ADR-034
+  Amendment 2). The joint set's hand pose is the identity; joints are absolute.
+- **Devices.** Two `XRT_DEVICE_TYPE_HAND_TRACKER` devices carrying
+  `XRT_INPUT_HT_UNOBSTRUCTED_{LEFT,RIGHT}`: they claim only the hand-tracking roles, so a webcam
+  never takes the controller roles from the keyboard / mouse fallback. `CONTROLLERS=1` makes them
+  left / right `khr/simple_controller` devices instead (select = pinch with hysteresis, grip / aim =
+  the palm joint), for apps that only bind controllers.
+- **`xrt_device` is not a versioned ABI.** Unlike the plug-in ifaces it has no `struct_size`; the
+  provider fills it from the vendored `xrt_device.h` (every slot set, unused ones return
+  `XRT_ERROR_NOT_IMPLEMENTED`), so a runtime that changes `struct xrt_device` needs a rebuild of
+  this provider. The in-tree providers avoid this by building in the runtime tree.
+
+### 11.5 Lifetime
+
+- `probe` opens nothing (the hand models by size, ONNX Runtime, a camera, the permission).
+- `create_devices` is cheap; the machinery is per process (input-provider spec §3 *Lifetime*).
+- **On demand.** The first `get_hand_tracking` (or, with `CONTROLLERS=1`, a controller poll)
+  starts the role's thread: verify the models, create the sessions, ask for the camera permission
+  if needed, open (or share) the camera. `IDLE_S` seconds after the last locate the thread closes
+  the camera and ends; the next locate starts it again. A thread that failed for good (models,
+  permission, no execution provider) is retried at most every 10 s.
+- **Presence** is "is there a usable camera": `PRESENT` after a successful probe and while
+  running, `ABSENT` on no camera / permission denied / models missing; hands out of view are
+  inactive joints, never `ABSENT`.
+- **Prediction.** Each locate returns the newest frame's joints moved rigidly by the palm's
+  velocity to the requested time, at most `PREDICT_MAX_MS` ahead; joints older than 300 ms (plus
+  that horizon) are inactive.
+
+### 11.6 Verified, and not
+
+- Verified (CI + this repository's tests): the 21 → 26 mapping, orientations, radii, the placement
+  solve (recovers a known translation to 1 mm; depth scales with the size prior), chirality, side
+  assignment, the display mapping incl. a pitched camera, camera sharing on the file camera, and
+  end to end through the input ABI on the file camera: a CC0 left-hand photo comes out as the left
+  hand only (the mirrored photo as the right), metric size 98–101 mm wrist → middle knuckle, thumb
+  on the correct side, -Z along the bones, +Y out of the back of the hand, no pinch, on CPU and
+  Core ML.
+- **Not verified:** a live camera hand test, two hands at once, the runtime's own loader and
+  `xrLocateHandJointsEXT` end to end (the fake host stands in for the runtime), Windows and Linux
+  capture (stubs, as for the viewer role).
+
+### 11.7 Open
+
+- Under the service the two roles run in different processes (§1): either the runtime hosts the
+  input provider beside the viewer provider in one satellite, or each role opens its own stream
+  (fine on macOS, a conflict on Windows unless the frame server shares the device).
+- A per-user hand-size calibration (`HAND_SCALE`), e.g. from the viewer's calibrated depth when a
+  hand touches a known point, or from the shared stereo camera's triangulation (§3, path 1).
+- The display's shared stereo camera (§3, path 1) is not consumed yet: it needs the runtime's
+  camera-consumer path and greyscale re-detection.
+- Thumb orientation (a proper thumb frame), and `XR_EXT_hand_interaction` / aim-pose conventions
+  beyond `khr/simple_controller`.

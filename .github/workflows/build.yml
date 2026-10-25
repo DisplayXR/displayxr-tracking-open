@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: BSL-1.0
 #
 # Build the provider, the fake host and the unit tests on macOS, Ubuntu 22.04 and Windows, run
-# every CTest that needs no camera, and check the provider exports exactly one symbol. Windows and
-# Linux build the capture stubs (no camera backend yet). One macOS job also converts the models
-# from the pinned upstream bundle (proving the pack's sha256s reproduce) and runs the inference
-# tests on the file camera. No job opens a camera.
+# every CTest that needs no camera, and check the provider exports exactly its two entry points (the
+# viewer role's and the hands role's). Windows and Linux build the capture stubs (no camera backend
+# yet). One macOS job also converts the models from the pinned upstream bundles (proving the pack's
+# sha256s reproduce) and runs the inference tests on the file camera. No job opens a camera.
 
 name: build
 
@@ -60,7 +60,7 @@ jobs:
       - name: Tests (no camera, no models)
         run: ctest --test-dir build --output-on-failure
 
-      - name: Exactly one export (Windows)
+      - name: Exactly the two entry points (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -68,28 +68,29 @@ jobs:
           $names = $out | Select-String -Pattern '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)' |
             ForEach-Object { $_.Matches[0].Groups[1].Value }
           Write-Host "exports: $($names -join ', ')"
-          if (@($names).Count -ne 1 -or $names -ne 'xrtTrackingPluginNegotiate') {
-            Write-Error "expected exactly xrtTrackingPluginNegotiate"
+          $sorted = (@($names) | Sort-Object) -join ','
+          if ($sorted -ne 'xrtInputPluginNegotiate,xrtTrackingPluginNegotiate') {
+            Write-Error "expected exactly xrtInputPluginNegotiate + xrtTrackingPluginNegotiate"
           }
           $deps = & dumpbin /nologo /dependents build\DisplayXR-OpenTracking.dll | Select-String '\.dll' |
             ForEach-Object { $_.Line.Trim() } | Where-Object { $_ -notmatch '^Dump of file' }
           Write-Host "imports: $($deps -join ', ')"
           if ($deps -match 'onnxruntime') { Write-Error "ONNX Runtime must not be imported statically" }
 
-      - name: Exactly one export (Linux)
+      - name: Exactly the two entry points (Linux)
         if: runner.os == 'Linux'
         run: |
-          names=$(nm -D --defined-only build/DisplayXR-OpenTracking.so | awk '$2 == "T" && $3 != "_init" && $3 != "_fini" { print $3 }')
+          names=$(nm -D --defined-only build/DisplayXR-OpenTracking.so | awk '$2 == "T" && $3 != "_init" && $3 != "_fini" { print $3 }' | sort | tr '\n' ' ')
           echo "exports: $names"
-          test "$names" = "xrtTrackingPluginNegotiate"
+          test "$names" = "xrtInputPluginNegotiate xrtTrackingPluginNegotiate "
           ! readelf -d build/DisplayXR-OpenTracking.so | grep -q onnxruntime
 
-      - name: Exactly one export (macOS)
+      - name: Exactly the two entry points (macOS)
         if: runner.os == 'macOS'
         run: |
-          names=$(nm -gU build/DisplayXR-OpenTracking.dylib | awk '$2 == "T" { print $3 }')
+          names=$(nm -gU build/DisplayXR-OpenTracking.dylib | awk '$2 == "T" { print $3 }' | sort | tr '\n' ' ')
           echo "exports: $names"
-          test "$names" = "_xrtTrackingPluginNegotiate"
+          test "$names" = "_xrtInputPluginNegotiate _xrtTrackingPluginNegotiate "
           ! otool -L build/DisplayXR-OpenTracking.dylib | grep -q onnxruntime
 
       - name: Install tree
@@ -132,7 +133,7 @@ jobs:
             -DOPENTRACK_TEST_MODELS_DIR="${{ github.workspace }}/models-cache"
           cmake --build build
 
-      - name: Tests (file camera, blank frame + face photo, CPU and Core ML)
+      - name: Tests (file camera, blank frame + face photo + hand photo, CPU and Core ML)
         run: ctest --test-dir build --output-on-failure
 
       - name: Pack blobs match
