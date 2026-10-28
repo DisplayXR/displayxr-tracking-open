@@ -556,6 +556,9 @@ struct oth_stats
 	int64_t since_ns;
 	uint32_t frames, hands, detects, rejected;
 	float rejected_m;
+	// Per side: the published palm's spread over the window (a hand held still = the jitter).
+	uint32_t palm_n[2];
+	double palm_sum[2][3], palm_sq[2][3];
 	double det_ms, lm_ms, proc_ms, lat_ms;
 };
 
@@ -575,6 +578,19 @@ stats_flush(struct oth_stats *st)
 		    ep, st->frames / secs, (double)st->hands / st->frames, st->detects,
 		    st->detects > 0 ? st->det_ms / st->detects : 0.0, st->lm_ms / st->frames, st->proc_ms / st->frames,
 		    st->lat_ms / st->frames);
+		for (int s = 0; s < 2; s++) {
+			if (st->palm_n[s] < 10) {
+				continue;
+			}
+			double sd[3];
+			for (int c = 0; c < 3; c++) {
+				const double m = st->palm_sum[s][c] / st->palm_n[s];
+				const double v = st->palm_sq[s][c] / st->palm_n[s] - m * m;
+				sd[c] = v > 0.0 ? sqrt(v) * 1000.0 : 0.0;
+			}
+			log_line("stats %s palm: %u frames, std x %.1f y %.1f z %.1f mm (held still = the jitter)",
+			         s == 0 ? "left" : "right", st->palm_n[s], sd[0], sd[1], sd[2]);
+		}
 		if (st->rejected > 0) {
 			log_line("stats: %u hand observations turned away as too far (newest %.0f mm)", st->rejected,
 			         (double)st->rejected_m * 1000.0);
@@ -750,6 +766,16 @@ worker(void *arg)
 		stats.frames++;
 		stats.hands += res.count;
 		stats.detects += res.detected ? 1u : 0u;
+		for (int s = 0; s < 2; s++) {
+			if (out[s].active) {
+				stats.palm_n[s]++;
+				for (int ax = 0; ax < 3; ax++) {
+					const double v = out[s].joints.pos[OT_HJ_PALM][ax];
+					stats.palm_sum[s][ax] += v;
+					stats.palm_sq[s][ax] += v * v;
+				}
+			}
+		}
 		if (res.rejected > 0) {
 			stats.rejected += res.rejected;
 			stats.rejected_m = admit.last_rejected_m;
