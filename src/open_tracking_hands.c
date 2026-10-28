@@ -1247,8 +1247,8 @@ create_device(int side, bool controllers)
 	b->get_face_tracking = ni_face;
 	b->get_body_skeleton = ni_body_skeleton;
 	b->get_body_joints = ni_body_joints;
-	b->reset_body_tracking_calibration_meta = ni_reset_body;
-	b->set_body_tracking_calibration_override_meta = ni_body_height;
+	b->reset_body_tracking_calibration = ni_reset_body;
+	b->set_body_tracking_calibration_override = ni_body_height;
 	b->set_output = dev_set_output;
 	b->get_output_limits = ni_output_limits;
 	b->get_presence = ni_presence;

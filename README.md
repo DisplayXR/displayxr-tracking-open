@@ -324,15 +324,27 @@ include the blobs) is flat: the provider, `libonnxruntime`, the pack, the four m
 
 ## The ABI it builds against
 
-`include/xrt/` is vendored **verbatim** from the runtime at `v2.53.0-17-ge5d7ffa57`
+`include/xrt/` is generated from the runtime's headers at `v2.53.0-17-ge5d7ffa57`
 (`e5d7ffa576833cded4b409105ca7c58b3a62466a`): `xrt_tracking_plugin.h` (viewer-tracking ABI major
 **1**, with the `get_camera_pose` host slot), `xrt_input_plugin.h` (input-provider ABI major **1**,
 with its `get_setting`, `get_display_geometry` and `get_camera_pose` host slots), `xrt_device.h`
 with what it includes (`xrt_defines.h`, `xrt_tracking.h`, `xrt_plane_detector.h`,
 `xrt_visibility_mask.h`, `xrt_limits.h`, `xrt_compiler.h`, `xrt_windows.h`, `xrt_config_os.h`),
-`xrt_camera_pose.h`, `xrt_component_settings.h`, `xrt_results.h`. Update by copying from a runtime
-release; never edit in place. `struct xrt_device` is not versioned by `struct_size`: re-vendor and
-rebuild when the runtime changes it.
+`xrt_camera_pose.h`, `xrt_component_settings.h`, `xrt_results.h`. The copies are vendor-neutral:
+`scripts/neutralize_headers.py` drops the runtime's hardware-specific device, input and output
+names and its vendor-extension face and body types, and writes out the values of the implicitly
+counted enums so nothing the provider exchanges with the runtime moves. CI checks both halves:
+`neutralize_headers.py --check include/xrt` (no vendor names) and `scripts/abi_check.py` against the
+runtime's headers at the pinned commit (every enumerator value, every struct size, every
+`struct xrt_device` offset). To update, regenerate from a runtime release, never edit by hand:
+
+```sh
+python3 scripts/neutralize_headers.py <runtime>/src/xrt/include/xrt include/xrt
+python3 scripts/abi_check.py <runtime>/src/xrt/include
+```
+
+and move `RUNTIME_SHA` in `.github/workflows/build.yml` and the commit above. `struct xrt_device`
+is not versioned by `struct_size`: regenerate and rebuild when the runtime changes it.
 
 ## License
 

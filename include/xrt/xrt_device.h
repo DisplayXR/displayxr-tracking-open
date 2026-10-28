@@ -486,8 +486,8 @@ struct xrt_device
 	 * @brief Get the requested blend shape properties & weights for a face tracker
 	 *
 	 * @param[in] xdev                    The device.
-	 * @param[in] facial_expression_type  The facial expression data type (XR_FB_face_tracking,
-	 * XR_HTC_facial_tracking, etc).
+	 * @param[in] facial_expression_type  The facial expression data type (an extension's
+	 * data type).
 	 * @param[in] at_timestamp_ns         Timestamp to be optionally used for prediction/history. For OXR extensions
 	 * that do not pass a timestamp, the current timestamp is used.
 	 * @param[in] out_value               Set of requested expression weights & blend shape properties.
@@ -503,8 +503,8 @@ struct xrt_device
 	 * @brief Get the body skeleton in T-pose, used to query the skeleton hierarchy, scale, proportions etc
 	 *
 	 * @param[in] xdev                    The device.
-	 * @param[in] body_tracking_type      The body joint set type (XR_FB_body_tracking,
-	 * XR_META_body_tracking_full_body, etc).
+	 * @param[in] body_tracking_type      The body joint set type (an extension's
+	 * joint set).
 	 * @param[in] out_value               The body skeleton hierarchy/properties.
 	 *
 	 * @see xrt_input_name
@@ -517,8 +517,8 @@ struct xrt_device
 	 * @brief Get the joint locations for a body tracker
 	 *
 	 * @param[in] xdev                    The device.
-	 * @param[in] body_tracking_type      The body joint set type (XR_FB_body_tracking,
-	 * XR_META_body_tracking_full_body, etc).
+	 * @param[in] body_tracking_type      The body joint set type (an extension's
+	 * joint set).
 	 * @param[in] desired_timestamp_ns    If the device can predict or has a history
 	 *                                    of locations, this is when the caller
 	 * @param[in] out_value               Set of body joint locations & properties.
@@ -531,20 +531,20 @@ struct xrt_device
 	                                struct xrt_body_joint_set *out_value);
 
 	/*!
-	 * @brief XR_META_body_tracking_calibration - body tracking extension to reset the body tracking calibration
+	 * @brief Body tracking extension to reset the body tracking calibration
 	 *
 	 * @param[in] xdev              The body tracking device.
 	 */
-	xrt_result_t (*reset_body_tracking_calibration_meta)(struct xrt_device *xdev);
+	xrt_result_t (*reset_body_tracking_calibration)(struct xrt_device *xdev);
 
 	/*!
-	 * @brief XR_META_body_tracking_calibration - body tracking extension to suggest a body tracking calibration
+	 * @brief Body tracking extension to suggest a body tracking calibration
 	 * override
 	 *
 	 * @param[in] xdev              The body tracking device.
 	 * @param[in] new_body_height   The suggested new body height to override.
 	 */
-	xrt_result_t (*set_body_tracking_calibration_override_meta)(struct xrt_device *xdev, float new_body_height);
+	xrt_result_t (*set_body_tracking_calibration_override)(struct xrt_device *xdev, float new_body_height);
 
 	/*!
 	 * Set a output value.
@@ -899,35 +899,35 @@ xrt_device_get_body_joints(struct xrt_device *xdev,
 }
 
 /*!
- * Helper function for @ref xrt_device::reset_body_tracking_calibration_meta.
+ * Helper function for @ref xrt_device::reset_body_tracking_calibration.
  *
- * @copydoc xrt_device::reset_body_tracking_calibration_meta
+ * @copydoc xrt_device::reset_body_tracking_calibration
  *
  * @public @memberof xrt_device
  */
 static inline xrt_result_t
-xrt_device_reset_body_tracking_calibration_meta(struct xrt_device *xdev)
+xrt_device_reset_body_tracking_calibration(struct xrt_device *xdev)
 {
-	if (xdev->reset_body_tracking_calibration_meta == NULL) {
+	if (xdev->reset_body_tracking_calibration == NULL) {
 		return XRT_ERROR_NOT_IMPLEMENTED;
 	}
-	return xdev->reset_body_tracking_calibration_meta(xdev);
+	return xdev->reset_body_tracking_calibration(xdev);
 }
 
 /*!
- * Helper function for @ref xrt_device::set_body_tracking_calibration_override_meta.
+ * Helper function for @ref xrt_device::set_body_tracking_calibration_override.
  *
- * @copydoc xrt_device::set_body_tracking_calibration_override_meta
+ * @copydoc xrt_device::set_body_tracking_calibration_override
  *
  * @public @memberof xrt_device
  */
 static inline xrt_result_t
-xrt_device_set_body_tracking_calibration_override_meta(struct xrt_device *xdev, float new_body_height)
+xrt_device_set_body_tracking_calibration_override(struct xrt_device *xdev, float new_body_height)
 {
-	if (xdev->set_body_tracking_calibration_override_meta == NULL) {
+	if (xdev->set_body_tracking_calibration_override == NULL) {
 		return XRT_ERROR_NOT_IMPLEMENTED;
 	}
-	return xdev->set_body_tracking_calibration_override_meta(xdev, new_body_height);
+	return xdev->set_body_tracking_calibration_override(xdev, new_body_height);
 }
 
 /*!

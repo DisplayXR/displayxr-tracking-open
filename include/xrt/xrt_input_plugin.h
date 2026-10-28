@@ -163,7 +163,7 @@ struct xrt_input_plugin_instance;
  * `probe()` answers "should I be loaded at all" once, at
  * `xrCreateInstance`. This answers the different, *continuous* question
  * the role arbiter asks every time it runs: is there real hardware
- * behind these devices at this instant. A Leap Motion can be unplugged
+ * behind these devices at this instant. A tracker can be unplugged
  * five minutes into a session and plugged back in later; the runtime
  * re-reads this and moves the hand roles between the provider and the
  * qwerty fallback accordingly (ADR-034 "Presence-gated role

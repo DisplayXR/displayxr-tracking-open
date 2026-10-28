@@ -91,7 +91,7 @@ add_library(${OPENTRACK_PROVIDER} MODULE
 	${OPENTRACK_CORE_SOURCES}
 	${OPENTRACK_CAPTURE_SOURCES})
 target_include_directories(${OPENTRACK_PROVIDER} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-# The vendored runtime headers are SYSTEM (/external:I on MSVC): they are copied verbatim and may warn
+# The vendored runtime headers are SYSTEM (/external:I on MSVC): they are generated from the runtime's and may warn
 # under this build's flags (an assert-only local in xrt_defines.h is C4189 in Release).
 target_include_directories(${OPENTRACK_PROVIDER} SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(${OPENTRACK_PROVIDER} SYSTEM PRIVATE ${OPENTRACK_ORT_INCLUDE_DIR})
