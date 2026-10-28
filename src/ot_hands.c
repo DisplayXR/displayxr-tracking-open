@@ -42,6 +42,56 @@ ot_hands_assign(const struct ot_hand_result *r, int out[2])
 	}
 }
 
+//! The side @p h holds track @p id on, or -1.
+static int
+held_side(const struct ot_hands *h, uint32_t id)
+{
+	for (int side = 0; side < 2; side++) {
+		if (h->have[side] && h->track[side] == id) {
+			return side;
+		}
+	}
+	return -1;
+}
+
+//! Does a hand with this evidence clearly belong on the other side than @p side?
+static bool
+contradicted(int side, float right_mean)
+{
+	return side == OT_SIDE_RIGHT ? right_mean < OT_HANDS_SIDE_FLIP : right_mean > 1.0f - OT_HANDS_SIDE_FLIP;
+}
+
+void
+ot_hands_assign_sticky(const struct ot_hands *h, const struct ot_hand_result *r, int out[2])
+{
+	int held[2] = {-1, -1};
+	const uint32_t n = r->count < 2 ? r->count : 2;
+	for (uint32_t i = 0; i < n; i++) {
+		const int side = held_side(h, r->hands[i].track_id);
+		held[i] = side >= 0 && !contradicted(side, r->hands[i].right_mean) ? side : -1;
+	}
+	if (n == 2 && held[0] >= 0 && held[0] == held[1]) {
+		held[0] = held[1] = -1; // cannot both keep one side: decide afresh
+	}
+	if ((n == 1 && held[0] < 0) || (n == 2 && held[0] < 0 && held[1] < 0)) {
+		ot_hands_assign(r, out);
+		return;
+	}
+	out[OT_SIDE_LEFT] = -1;
+	out[OT_SIDE_RIGHT] = -1;
+	for (uint32_t i = 0; i < n; i++) {
+		if (held[i] >= 0) {
+			out[held[i]] = (int)i;
+		}
+	}
+	// A newcomer next to a held hand takes the other side.
+	for (uint32_t i = 0; i < n; i++) {
+		if (held[i] < 0) {
+			out[out[OT_SIDE_LEFT] < 0 ? OT_SIDE_LEFT : OT_SIDE_RIGHT] = (int)i;
+		}
+	}
+}
+
 void
 ot_cam_to_display(const struct ot_cam_pose *pose, const float p[3], float out[3])
 {
@@ -132,7 +182,7 @@ ot_hands_update(struct ot_hands *h,
                 struct ot_hand_state out[2])
 {
 	int idx[2];
-	ot_hands_assign(r, idx);
+	ot_hands_assign_sticky(h, r, idx);
 	for (int side = 0; side < 2; side++) {
 		struct ot_hand_state *st = &out[side];
 		memset(st, 0, sizeof(*st));

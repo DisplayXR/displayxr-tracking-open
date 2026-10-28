@@ -301,7 +301,10 @@ cross-checked against the 3D shape's chirality (`ot_hand_chirality`: the knuckle
 index × little points to the palm side for a right hand; the palm side is where the fingers bend).
 The capture forces mirroring off and the sampler un-mirrors a `MIRROR=1` camera, so the model
 always sees an un-mirrored image. Per track the score is averaged (the newest 30 frames); with two
-hands the more "right" one is right, with one the threshold is 0.5.
+hands the more "right" one is right, with one the threshold is 0.5. A hand keeps the side it holds
+while its evidence stays within 0.25 of the other side (P(right) above 0.25 on the right, below
+0.75 on the left): seen edge-on its handedness reads near 0.5 and would otherwise swap sides, and
+the first hand would move when the second arrives.
 
 ### 11.3 Depth (monocular, honest)
 

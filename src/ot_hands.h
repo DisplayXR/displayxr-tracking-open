@@ -99,6 +99,19 @@ void
 ot_hands_assign(const struct ot_hand_result *r, int out[2]);
 
 /*!
+ * ot_hands_assign with memory: a hand that already holds a side keeps it while
+ * its evidence does not clearly say otherwise (right_mean within
+ * OT_HANDS_SIDE_FLIP of the other side's), so a hand seen edge-on — whose
+ * handedness reads near 0.5 — does not swap sides from frame to frame, and the
+ * user's first hand does not move when the second appears.
+ */
+void
+ot_hands_assign_sticky(const struct ot_hands *h, const struct ot_hand_result *r, int out[2]);
+
+//! A held side flips only when the track's P(right) is past this on the other side (0.25 / 0.75).
+#define OT_HANDS_SIDE_FLIP 0.25f
+
+/*!
  * One analysed frame -> both sides. A side without a hand this frame comes
  * out inactive (and its filter restarts with the next track).
  */
