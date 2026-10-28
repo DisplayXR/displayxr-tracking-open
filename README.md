@@ -292,7 +292,7 @@ defaults to `coreml` on macOS (`cpu` elsewhere), plus:
 | Key | Default | |
 |---|---|---|
 | `ENABLE` | 1 | 0: probe declines. The camera opens only while an app locates joints |
-| `CONTROLLERS` | 0 | 1: left / right `khr/simple_controller` devices (select = pinch, grip / aim = the palm) that take the controller roles while a camera is present; 0: hand joints only |
+| `CONTROLLERS` | 0 | 1: left / right `khr/simple_controller` devices (select = pinch, grip / aim = the palm) that take a controller role when that hand pinches and give it back when the keyboard and mouse are used (on a runtime with ADR-034 Amendment 6; an older runtime gives them the roles whenever a camera is present). While an app runs, the camera stays open to see that pinch; 0: hand joints only |
 | `MAX_HANDS` | 2 | 1 or 2 |
 | `HAND_SCALE` | 1.0 | the user's hand size relative to the model's average; the depth scales with it |
 | `MAX_DISTANCE_MM` | 800 | a hand whose wrist is farther from the camera is not the user's (someone behind them) and never takes a track; 0 = any distance |

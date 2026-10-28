@@ -22,7 +22,13 @@
  *    the camera and publishes both hands per analysed frame; IDLE_S seconds
  *    after the last locate it closes the camera and ends;
  *  - get_presence: PRESENT while a usable camera exists (hands out of view are
- *    inactive joints, never ABSENT).
+ *    inactive joints, never ABSENT);
+ *  - get_engaged_ns (CONTROLLERS=1 only): the last time each hand pinched, so
+ *    the controller role goes to the hands when one pinches and back to the
+ *    keyboard and mouse when they are used (ADR-034 Amendment 6). The runtime
+ *    calls it while it resolves roles for a live app, also when the hands do
+ *    not hold the role, so each call is demand: the camera stays open to see
+ *    the pinch that takes the role back.
  * Poses are display-plane relative (`XRT_TRACKING_TYPE_RIG_LOCAL`, spec
  * §4b.4): the runtime anchors them to the rig, so they follow voluntary rig
  * motion and not head parallax (ADR-034 Amendment 2). Settings only through
@@ -338,7 +344,8 @@ struct oth_hub
 	char camera_key[OT_CAMERA_KEY_MAX];
 	char ep_used[64];
 	struct ot_hand_state hands[2];
-	uint64_t frames; //!< analysed frames since the process started (diagnostics)
+	int64_t engaged_ns[2]; //!< ot_monotonic_ns of each side's last pinch; 0 = never
+	uint64_t frames;       //!< analysed frames since the process started (diagnostics)
 };
 
 static ot_mutex g_hub_init_lock = OT_MUTEX_INITIALIZER;
@@ -408,9 +415,14 @@ set_state(enum oth_state s, const char *fmt, ...)
 static void
 publish(const struct ot_hand_state hands[2])
 {
+	const int64_t now = ot_monotonic_ns();
 	ot_lock(&g_h.lock);
-	g_h.hands[0] = hands[0];
-	g_h.hands[1] = hands[1];
+	for (int i = 0; i < 2; i++) {
+		g_h.hands[i] = hands[i];
+		if (hands[i].active && hands[i].pinching) {
+			g_h.engaged_ns[i] = now;
+		}
+	}
 	g_h.frames++;
 	ot_unlock(&g_h.lock);
 }
@@ -1435,6 +1447,26 @@ oth_get_presence(struct xrt_input_plugin_instance *inst)
 	return p;
 }
 
+/*!
+ * The last time @p hand pinched (ADR-034 Amendment 6), for the controller role. Hand joints alone
+ * (CONTROLLERS=0) publish no controllers, so they never engage. Each call is demand: the runtime
+ * makes it while it resolves roles for a live app, and a closed camera could not see the pinch that
+ * takes the role back from the keyboard and mouse.
+ */
+static int64_t
+oth_get_engaged_ns(struct xrt_input_plugin_instance *inst, uint32_t hand)
+{
+	(void)inst;
+	if (!g_hub_ready || hand > XRT_INPUT_PLUGIN_HAND_RIGHT || !g_h.cfg.controllers) {
+		return 0;
+	}
+	demand();
+	ot_lock(&g_h.lock);
+	const int64_t t = g_h.engaged_ns[hand == XRT_INPUT_PLUGIN_HAND_LEFT ? OT_SIDE_LEFT : OT_SIDE_RIGHT];
+	ot_unlock(&g_h.lock);
+	return t;
+}
+
 static void
 oth_destroy(struct xrt_input_plugin_instance *inst)
 {
@@ -1456,6 +1488,7 @@ static struct xrt_input_plugin_iface g_iface = {
     .destroy = oth_destroy,
     .get_presence = oth_get_presence,
     .describe_settings = describe_settings,
+    .get_engaged_ns = oth_get_engaged_ns,
 };
 
 XRT_INPUT_PLUGIN_EXPORT xrt_result_t

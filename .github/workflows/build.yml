@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       # The runtime commit include/xrt was generated from (README, "The ABI it builds against").
-      RUNTIME_SHA: e5d7ffa576833cded4b409105ca7c58b3a62466a
+      RUNTIME_SHA: 43264c33f9664862999d37f7a49bb2d50f985c4e
     steps:
       - uses: actions/checkout@v4
       - name: No vendor names in include/xrt
