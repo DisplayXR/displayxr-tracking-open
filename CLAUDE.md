@@ -42,7 +42,7 @@ as pinned, hash-checked archives; never commit a model blob.
   `tests/hand_tests.c`.
 - `packs/open-tracking-default.models.json`, `scripts/fetch_models.py` (+ `mp_onnx.py`,
   `requirements-convert.txt`), `scripts/check_pack.py`.
-- `include/xrt/` — vendored **verbatim** from the runtime (commit in `README.md`). Never edit.
+- `include/xrt/` — generated from the runtime's headers by `scripts/neutralize_headers.py` (vendor names dropped, ABI kept; commit in `README.md`). Never edit by hand; CI runs `--check` and `scripts/abi_check.py`.
 
 ## Rules
 
