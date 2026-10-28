@@ -19,6 +19,7 @@ ot_hands_params_defaults(struct ot_hands_params *p)
 	p->min_cutoff_hz = 1.0f;
 	p->beta = 3.0f;
 	p->d_cutoff_hz = 1.0f;
+	p->max_distance_m = 0.8f;
 }
 
 void
@@ -51,18 +52,18 @@ ot_cam_to_display(const struct ot_cam_pose *pose, const float p[3], float out[3]
 	out[2] = pose->t[2] + r[2];
 }
 
-//! The 21 points of one observed hand in display space (unfiltered). False when it cannot be placed.
+//! The 21 points of one observed hand in the camera frame. False when it cannot be placed.
 static bool
-place(const struct ot_intrinsics *k,
-      const struct ot_hands_params *p,
-      const struct ot_cam_pose *pose,
-      const struct ot_hand_obs *o,
-      float (*disp)[3],
-      float *depth_m)
+place_camera(const struct ot_intrinsics *k,
+             const struct ot_hands_params *p,
+             const struct ot_cam_pose *pose,
+             const struct ot_hand_obs *o,
+             float (*cam)[3],
+             float *depth_m)
 {
 	struct ot_intrinsics kk = *k;
 	kk.f *= pose->focal_scale > 0.0f ? pose->focal_scale : 1.0f;
-	float shape[OT_HAND_LM_COUNT][3], cam[OT_HAND_LM_COUNT][3], t[3] = {0, 0, 0};
+	float shape[OT_HAND_LM_COUNT][3], t[3] = {0, 0, 0};
 	ot_hand_world_to_camera((const float(*)[3])o->world, o->roi.rot, shape);
 	const float s = p->hand_scale > 0.0f ? p->hand_scale : 1.0f;
 	for (int i = 0; i < OT_HAND_LM_COUNT; i++) {
@@ -75,10 +76,50 @@ place(const struct ot_intrinsics *k,
 	}
 	*depth_m = sqrtf(cam[OT_HL_WRIST][0] * cam[OT_HL_WRIST][0] + cam[OT_HL_WRIST][1] * cam[OT_HL_WRIST][1] +
 	                 cam[OT_HL_WRIST][2] * cam[OT_HL_WRIST][2]);
+	return true;
+}
+
+//! The 21 points of one observed hand in display space (unfiltered). False when it cannot be placed.
+static bool
+place(const struct ot_intrinsics *k,
+      const struct ot_hands_params *p,
+      const struct ot_cam_pose *pose,
+      const struct ot_hand_obs *o,
+      float (*disp)[3],
+      float *depth_m)
+{
+	float cam[OT_HAND_LM_COUNT][3];
+	if (!place_camera(k, p, pose, o, cam, depth_m)) {
+		return false;
+	}
 	for (int i = 0; i < OT_HAND_LM_COUNT; i++) {
 		ot_cam_to_display(pose, cam[i], disp[i]);
 	}
 	return true;
+}
+
+bool
+ot_hands_distance(const struct ot_intrinsics *k,
+                  const struct ot_hands_params *p,
+                  const struct ot_cam_pose *pose,
+                  const struct ot_hand_obs *o,
+                  float *out_m)
+{
+	float cam[OT_HAND_LM_COUNT][3];
+	return place_camera(k, p, pose, o, cam, out_m);
+}
+
+bool
+ot_hands_admit(void *user, const struct ot_hand_obs *o)
+{
+	struct ot_hands_admit *a = (struct ot_hands_admit *)user;
+	float d;
+	if (a->p->max_distance_m <= 0.0f || a->k->f <= 0.0f || !ot_hands_distance(a->k, a->p, a->pose, o, &d) ||
+	    d <= a->p->max_distance_m) {
+		return true;
+	}
+	a->last_rejected_m = d;
+	return false;
 }
 
 void

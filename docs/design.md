@@ -289,7 +289,10 @@ long side × 2.6) or, in tracking mode, from the previous frame's landmarks (wri
 the index / middle / ring knuckles upright, the palm landmarks' box moved 0.1 × its height
 toward the fingers, long side × 2). A presence below `PRESENCE_MIN` drops the hand; two tracks on
 one hand (ROI overlap > 0.5) keep the more confident; a detection overlapping a followed hand is
-skipped. The model's outputs, identified by name: 21 landmarks in crop px, presence, handedness,
+skipped. A hand placed (below) farther than `MAX_DISTANCE_MM` (800) from the camera is someone
+else's — a person behind the user, a hand on a poster — and is turned away before it takes a track:
+a followed one is dropped, a detected one never takes a slot, so it cannot keep the user's second
+hand out. The model's outputs, identified by name: 21 landmarks in crop px, presence, handedness,
 and 21 "world" landmarks (metric, about the hand's centre, crop axes).
 
 **Handedness.** The handedness output is P(the subject's right hand) for an **un-mirrored**
