@@ -31,12 +31,21 @@ extern "C" {
 
 struct ot_hand_tracker;
 
+struct ot_hand_obs;
+
 struct ot_hand_tracker_config
 {
 	float detect_min_score; //!< palm detector score threshold (0.5)
 	float presence_min;     //!< landmark presence below this = the hand is lost (0.5)
 	uint32_t detect_every; //!< while fewer than max_hands are followed (and at least one is), detect every N frames
 	uint32_t max_hands;    //!< 1 or 2
+	/*!
+	 * Optional: false turns a hand away (a background hand, too far to be the user's). A followed
+	 * hand it rejects is dropped; a detected one never takes a slot, so it cannot keep the user's
+	 * second hand out.
+	 */
+	bool (*admit)(void *user, const struct ot_hand_obs *obs);
+	void *admit_user;
 };
 
 void
@@ -60,6 +69,7 @@ struct ot_hand_result
 	struct ot_hand_obs hands[OT_HAND_MAX];
 	bool detected;        //!< this frame ran the palm detector
 	uint32_t palms;       //!< palms the detector found (above the threshold, after NMS)
+	uint32_t rejected;    //!< hands the admit callback turned away this frame
 	float best_raw_score; //!< detector frames: the best anchor's score, even below the threshold
 	double ms_detect, ms_landmarks, ms_crop;
 };
