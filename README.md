@@ -290,6 +290,7 @@ the manifest; `displayxr-cli input options open-tracking-hands`). `DEVICE`, `WID
 | `CONTROLLERS` | 0 | 1: left / right `khr/simple_controller` devices (select = pinch, grip / aim = the palm) that take the controller roles while a camera is present; 0: hand joints only |
 | `MAX_HANDS` | 2 | 1 or 2 |
 | `HAND_SCALE` | 1.0 | the user's hand size relative to the model's average; the depth scales with it |
+| `MAX_DISTANCE_MM` | 800 | a hand whose wrist is farther from the camera is not the user's (someone behind them) and never takes a track; 0 = any distance |
 | `PINCH_ON_MM`, `PINCH_OFF_MM` | 25, 35 | |
 | `DETECT_MIN`, `PRESENCE_MIN`, `DETECT_EVERY` | 0.5, 0.5, 5 | palm detector threshold; landmark presence; with one hand followed, look for the other every N frames |
 | `PREDICT_MAX_MS` | 50 | how far past the newest frame a locate extrapolates |

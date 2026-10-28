@@ -79,6 +79,8 @@ static const struct xrt_component_setting_desc g_descs[] = {
     {"PINCH_ON_MM", XRT_COMPONENT_SETTING_TYPE_FLOAT, "25", "thumb tip to index tip below this = pinching"},
     {"PINCH_OFF_MM", XRT_COMPONENT_SETTING_TYPE_FLOAT, "35", "a pinch ends above this"},
     {"DETECT_MIN", XRT_COMPONENT_SETTING_TYPE_FLOAT, "0.5", "palm detector score threshold"},
+    {"MAX_DISTANCE_MM", XRT_COMPONENT_SETTING_TYPE_INT, "800",
+     "a hand farther than this from the camera is not the user's (someone behind them); 0 = any distance"},
     {"PRESENCE_MIN", XRT_COMPONENT_SETTING_TYPE_FLOAT, "0.5", "hand presence below this = the hand is lost"},
     {"DETECT_EVERY", XRT_COMPONENT_SETTING_TYPE_INT, "5",
      "while one hand is followed, look for the other every N frames (with none, every frame)"},
@@ -262,6 +264,7 @@ read_config(struct oth_config *c)
 	c->hands.min_cutoff_hz = setting_float("FILTER_MIN_CUTOFF", 1.0f);
 	c->hands.beta = setting_float("FILTER_BETA", 3.0f);
 	c->hands.d_cutoff_hz = setting_float("FILTER_D_CUTOFF", 1.0f);
+	c->hands.max_distance_m = (float)setting_int("MAX_DISTANCE_MM", 800, 0, 10000) / 1000.0f;
 	c->predict_max_ns = (int64_t)setting_int("PREDICT_MAX_MS", 50, 0, 500) * 1000000LL;
 	c->idle_s = (uint32_t)setting_int("IDLE_S", 5, 0, 86400);
 	c->permission_timeout_ms = (uint32_t)setting_int("PERMISSION_TIMEOUT_S", 120, 1, 3600) * 1000u;
@@ -551,7 +554,8 @@ create_tracker(const struct oth_config *c, const struct ot_pack *pack, bool forc
 struct oth_stats
 {
 	int64_t since_ns;
-	uint32_t frames, hands, detects;
+	uint32_t frames, hands, detects, rejected;
+	float rejected_m;
 	double det_ms, lm_ms, proc_ms, lat_ms;
 };
 
@@ -571,6 +575,10 @@ stats_flush(struct oth_stats *st)
 		    ep, st->frames / secs, (double)st->hands / st->frames, st->detects,
 		    st->detects > 0 ? st->det_ms / st->detects : 0.0, st->lm_ms / st->frames, st->proc_ms / st->frames,
 		    st->lat_ms / st->frames);
+		if (st->rejected > 0) {
+			log_line("stats: %u hand observations turned away as too far (newest %.0f mm)", st->rejected,
+			         (double)st->rejected_m * 1000.0);
+		}
 	}
 	memset(st, 0, sizeof(*st));
 	st->since_ns = ot_monotonic_ns();
@@ -591,6 +599,14 @@ worker(void *arg)
 	memset(&fb, 0, sizeof(fb));
 	char err[512];
 	bool failed = true;
+	struct ot_cam_pose pose;
+	memset(&pose, 0, sizeof(pose));
+	struct ot_intrinsics k;
+	memset(&k, 0, sizeof(k));
+	// Background hands never take a track (ot_hands_admit reads k and pose as they change).
+	struct ot_hands_admit admit = {.k = &k, .p = &c.hands, .pose = &pose, .last_rejected_m = 0.0f};
+	c.tracker.admit = ot_hands_admit;
+	c.tracker.admit_user = &admit;
 
 	set_state(OTH_STATE_STARTING, "loading models");
 	struct ot_pack pack;
@@ -627,11 +643,8 @@ worker(void *arg)
 	memset(&cam, 0, sizeof(cam));
 	struct ot_hands hands;
 	ot_hands_reset(&hands);
-	struct ot_cam_pose pose;
-	memset(&pose, 0, sizeof(pose));
-	struct ot_intrinsics k;
-	memset(&k, 0, sizeof(k));
 	int64_t last_pose_read = 0;
+	bool first_reject = true;
 	bool first_hand = true;
 	uint32_t logged_track[2] = {0, 0};
 	struct oth_stats stats;
@@ -737,6 +750,16 @@ worker(void *arg)
 		stats.frames++;
 		stats.hands += res.count;
 		stats.detects += res.detected ? 1u : 0u;
+		if (res.rejected > 0) {
+			stats.rejected += res.rejected;
+			stats.rejected_m = admit.last_rejected_m;
+			if (first_reject) {
+				first_reject = false;
+				log_line("a hand %.0f mm from the camera is farther than MAX_DISTANCE_MM (%.0f): not the "
+				         "user's, ignored",
+				         (double)admit.last_rejected_m * 1000.0, (double)c.hands.max_distance_m * 1000.0);
+			}
+		}
 		stats.det_ms += res.ms_detect;
 		stats.lm_ms += res.ms_landmarks;
 		stats.proc_ms += (double)(ot_monotonic_ns() - proc0) * 1e-6;

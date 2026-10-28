@@ -57,6 +57,7 @@ struct ot_hands_params
 	float min_cutoff_hz; //!< One Euro, 1.0
 	float beta;          //!< per m/s, 3.0
 	float d_cutoff_hz;   //!< 1.0
+	float max_distance_m; //!< hands whose wrist is farther from the camera are not the user's (0.8; 0 = any)
 };
 
 void
@@ -109,6 +110,35 @@ ot_hands_update(struct ot_hands *h,
                 const struct ot_hand_result *r,
                 int64_t capture_ns,
                 struct ot_hand_state out[2]);
+
+/*!
+ * The camera -> wrist distance of @p o, placed as ot_hands_update places it.
+ * False when it cannot be placed.
+ */
+bool
+ot_hands_distance(const struct ot_intrinsics *k,
+                  const struct ot_hands_params *p,
+                  const struct ot_cam_pose *pose,
+                  const struct ot_hand_obs *o,
+                  float *out_m);
+
+//! What the tracker's admit callback needs (ot_hands_admit).
+struct ot_hands_admit
+{
+	const struct ot_intrinsics *k;
+	const struct ot_hands_params *p;
+	const struct ot_cam_pose *pose;
+	float last_rejected_m; //!< the distance of the newest hand turned away
+};
+
+/*!
+ * The tracker's admit callback (@p user = struct ot_hands_admit): a hand is
+ * the user's unless it is placed farther than p->max_distance_m — a person
+ * walking past behind the user, a hand on a poster. A hand that cannot be
+ * placed is admitted (ot_hands_update drops it).
+ */
+bool
+ot_hands_admit(void *user, const struct ot_hand_obs *o);
 
 //! Camera -> display: T + R · p.
 void

@@ -49,6 +49,8 @@ ot_hand_tracker_config_defaults(struct ot_hand_tracker_config *c)
 	c->presence_min = 0.5f;
 	c->detect_every = 5;
 	c->max_hands = 2;
+	c->admit = NULL;
+	c->admit_user = NULL;
 }
 
 static double
@@ -365,6 +367,11 @@ ot_hand_tracker_process(
 			s->tracking = false;
 			continue;
 		}
+		if (t->cfg.admit != NULL && !t->cfg.admit(t->cfg.admit_user, &obs)) {
+			s->tracking = false;
+			out->rejected++;
+			continue;
+		}
 		accept(t, s, &obs, out);
 	}
 	// Two tracks that converged on one hand: keep the more confident.
@@ -418,6 +425,10 @@ ot_hand_tracker_process(
 			return false;
 		}
 		if (obs.presence < t->cfg.presence_min) {
+			continue;
+		}
+		if (t->cfg.admit != NULL && !t->cfg.admit(t->cfg.admit_user, &obs)) {
+			out->rejected++;
 			continue;
 		}
 		free_slot->tracking = true;
