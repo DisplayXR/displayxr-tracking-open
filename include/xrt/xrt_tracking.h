@@ -40,22 +40,19 @@ typedef int64_t timepoint_ns;
 enum xrt_tracking_type
 {
 	// The device(s) are never tracked.
-	XRT_TRACKING_TYPE_NONE,
+	XRT_TRACKING_TYPE_NONE = 0,
 
 	// The device(s) are tracked by RGB camera(s).
-	XRT_TRACKING_TYPE_RGB,
+	XRT_TRACKING_TYPE_RGB = 1,
 
-	// The device(s) are tracked by Ligthhouse
-	XRT_TRACKING_TYPE_LIGHTHOUSE,
 
-	// The device(s) are tracked by magnetic fields, eg. Razer Hydra.
-	XRT_TRACKING_TYPE_MAGNETIC,
+	XRT_TRACKING_TYPE_MAGNETIC = 3,
 
 	// The device(s) are tracked by external SLAM
-	XRT_TRACKING_TYPE_EXTERNAL_SLAM,
+	XRT_TRACKING_TYPE_EXTERNAL_SLAM = 4,
 
 	// The device(s) are tracked by other methods.
-	XRT_TRACKING_TYPE_OTHER,
+	XRT_TRACKING_TYPE_OTHER = 5,
 
 	/*!
 	 * The device's poses are DISPLAY-PLANE-RELATIVE (rig-local): origin at the
@@ -63,9 +60,8 @@ enum xrt_tracking_type
 	 * anchors this origin at the initial rig (u_space_overseer::rig_initial), so
 	 * world = rig(t) o pose with no standing-height or mount knowledge in the
 	 * provider. New providers use this; TYPE_OTHER keeps today's stage-anchored
-	 * behaviour (ultraleap's ul_mount_offset_default {0, 1.45, -0.10} stays).
 	 */
-	XRT_TRACKING_TYPE_RIG_LOCAL,
+	XRT_TRACKING_TYPE_RIG_LOCAL = 6,
 };
 
 /*!
