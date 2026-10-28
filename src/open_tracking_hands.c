@@ -344,7 +344,9 @@ struct oth_hub
 	char camera_key[OT_CAMERA_KEY_MAX];
 	char ep_used[64];
 	struct ot_hand_state hands[2];
-	int64_t engaged_ns[2]; //!< ot_monotonic_ns of each side's last pinch; 0 = never
+	int64_t engaged_ns[2]; //!< ot_monotonic_ns of each side's last deliberate pinch; 0 = never
+	bool seen_open[2];     //!< the side was tracked open since it was last lost
+	bool pinch_held[2];    //!< the side is inside a deliberate pinch (one that started on an open hand)
 	uint64_t frames;       //!< analysed frames since the process started (diagnostics)
 };
 
@@ -419,8 +421,19 @@ publish(const struct ot_hand_state hands[2])
 	ot_lock(&g_h.lock);
 	for (int i = 0; i < 2; i++) {
 		g_h.hands[i] = hands[i];
-		if (hands[i].active && hands[i].pinching) {
-			g_h.engaged_ns[i] = now;
+		// Engagement is a pinch that starts on a hand already seen open: a relaxed hand rests with the
+		// thumb near the index and enters the view "pinching", and must not take a controller role.
+		if (!hands[i].active) {
+			g_h.seen_open[i] = false;
+			g_h.pinch_held[i] = false;
+		} else if (!hands[i].pinching) {
+			g_h.seen_open[i] = true;
+			g_h.pinch_held[i] = false;
+		} else {
+			g_h.pinch_held[i] = g_h.pinch_held[i] || g_h.seen_open[i];
+			if (g_h.pinch_held[i]) {
+				g_h.engaged_ns[i] = now;
+			}
 		}
 	}
 	g_h.frames++;
