@@ -544,14 +544,14 @@ test_hands(void)
 	// A background hand: the near one (0.52 m) is the user's, the same hand 1.2 m away is not.
 	struct ot_hands_admit adm = {.k = &k, .p = &prm, .pose = &pose, .last_rejected_m = 0.0f};
 	check(ot_hands_admit(&adm, &r.hands[0]), "a hand at 0.52 m is admitted");
-	float far[OT_HAND_LM_COUNT][3];
+	float distant[OT_HAND_LM_COUNT][3];
 	for (int i = 0; i < OT_HAND_LM_COUNT; i++) {
-		far[i][0] = hand[i][0] - 0.2f;
-		far[i][1] = hand[i][1] - 0.1f;
-		far[i][2] = hand[i][2] + 1.2f;
+		distant[i][0] = hand[i][0] - 0.2f;
+		distant[i][1] = hand[i][1] - 0.1f;
+		distant[i][2] = hand[i][2] + 1.2f;
 	}
 	struct ot_hand_obs fo;
-	obs_from_camera_hand(&k, (const float(*)[3])far, 0.2f, 8, &fo);
+	obs_from_camera_hand(&k, (const float(*)[3])distant, 0.2f, 8, &fo);
 	check(!ot_hands_admit(&adm, &fo) && approx(adm.last_rejected_m, 1.22, 0.02),
 	      "a hand at 1.2 m is turned away (%.3f m)", adm.last_rejected_m);
 	prm.max_distance_m = 0.0f;
