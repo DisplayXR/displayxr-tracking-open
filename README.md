@@ -1,25 +1,28 @@
 # DisplayXR open camera tracking provider
 
 `DisplayXR-OpenTracking` is a [DisplayXR runtime](https://github.com/DisplayXR/displayxr-runtime)
-component that turns an ordinary camera into **viewer tracking** (head and eyes), and later
-**hand tracking**, with open models only. It is what a DisplayXR box gets when its display has no
+component that turns an ordinary camera into **viewer tracking** (head and eyes) and **hand
+tracking** (`XR_EXT_hand_tracking` joints), with open models only. It is what a DisplayXR box gets when its display has no
 tracker of its own: a laptop webcam is enough for head-coupled parallax.
 
-> **Status: the viewer role works on macOS** (AVFoundation capture, ONNX Runtime with Core ML).
-> Windows (Media Foundation) and Linux (V4L2) capture, the hands role and the installers are
-> follow-ups; on those OSes the provider builds and declines in `probe`. Design:
-> [`docs/design.md`](docs/design.md).
+> **Status: the viewer role and the hands role work on macOS** (AVFoundation capture, ONNX
+> Runtime with Core ML). The hands role is verified end to end on still images through its ABI,
+> not yet on a live camera. Windows (Media Foundation) and Linux (V4L2) capture and the installers
+> are follow-ups; on those OSes the provider builds and declines in `probe`. Design:
+> [`docs/design.md`](docs/design.md) (hands: §11).
 
 | Role | Runtime class | Registry id | Status |
 |---|---|---|---|
 | Head + eye positions | viewer-tracking provider (ABI 1) | `open-tracking` | macOS |
-| Hand joints, pinch | input provider (ADR-034) | `open-tracking-hands` | follow-up |
+| Hand joints (26 per hand), pinch | input provider (ADR-034, input ABI 1) | `open-tracking-hands` | macOS |
 
 - **A display that tracks the viewer itself always wins** (runtime policy): on such a screen this
   provider stays in standby and never opens a camera. It serves screens whose display declares
   `EXTERNAL_OK` and does not track.
-- **Frames never leave the process** and are never written anywhere; only eye and head poses are
-  published.
+- **Frames never leave the process** and are never written anywhere; only eye and head poses and
+  hand joints are published.
+- **One camera, two roles:** both entry points are in one binary, and within a process both roles
+  share one stream per camera (one privacy indicator); each runs its own inference on the frames.
 
 ## How it works
 
@@ -62,6 +65,41 @@ One thread per started provider. Per camera frame (the newest; older ones are dr
    the iris scale — because the runtime's camera-pose calibration solves against it. On loss: the
    last known eyes with `TRACKING` clear; before the first face nothing (the runtime ignores a
    sample without eyes).
+
+## How the hands role works
+
+Same binary, its own thread, started by the first joint locate (design §11). Per camera frame:
+
+1. **Palm detection** (full, 192², letterboxed) only when fewer hands are followed than
+   `MAX_HANDS`: every frame with none, every `DETECT_EVERY` frames with one.
+2. **Hand landmarks** (full, 224²) per hand on a rotated crop: from the palm detection (wrist →
+   middle knuckle upright, centre half a box toward the fingers, long side × 2.6), then from the
+   previous frame's landmarks (tracking mode, long side × 2). Out: 21 landmarks, presence,
+   handedness, and 21 metric "world" landmarks. Presence below `PRESENCE_MIN` drops the hand.
+3. **Left or right**: the handedness output is P(the subject's right hand) on the un-mirrored
+   image, averaged over the track; with two hands the more "right" one is right. A hand keeps its
+   side until its evidence clearly says otherwise (P(right) past 0.25 / 0.75).
+4. **Depth, an estimate from hand size**: the metric hand (× `HAND_SCALE`) is placed along the
+   landmarks' pixel rays by linear least squares, each landmark then on its own ray at that depth
+   (exact 2D reprojection). A hand 10 % larger than the model's average reads 10 % farther.
+5. **Display space**: `T + R · p` with the camera's pose from the runtime (`get_camera_pose`; the
+   top-centre-of-the-bezel prior until calibrated, the same answer the viewer role gets), then a
+   One Euro filter per coordinate.
+6. **26 joints** (`XR_EXT_hand_tracking` order): the 20 measured joints one to one; synthesised:
+   each finger's metacarpal joint a quarter of the way wrist → knuckle, the palm at the middle of
+   the middle metacarpal. -Z along each bone toward the fingertip, +Y out of the back of the hand
+   (the thumb's turned toward the index side), radii from a nominal adult hand scaled by this hand's size. Pinch: thumb tip to index tip below
+   25 mm (released above 35 mm).
+7. **Published** on two `XRT_DEVICE_TYPE_HAND_TRACKER` devices (`XRT_INPUT_HT_UNOBSTRUCTED_LEFT /
+   RIGHT`) whose origin is `XRT_TRACKING_TYPE_RIG_LOCAL` (display-plane relative): the runtime
+   anchors it to the rig, so hands follow WASD / mouse-look and never the viewer's head parallax.
+   A locate gets the newest frame moved by the palm's velocity to the requested time (at most
+   `PREDICT_MAX_MS`). `CONTROLLERS=1` publishes left / right `khr/simple_controller` devices
+   instead (select = pinch, grip / aim = the palm), which then take the controller roles.
+
+Presence is `PRESENT` while a usable camera exists (no hand in view = inactive joints).
+`IDLE_S` seconds after the last locate the camera closes. The provider fills `struct xrt_device`
+from the vendored header, which has no `struct_size`: a runtime that changes it needs a rebuild.
 
 ### Capture time
 
@@ -114,8 +152,24 @@ camera replaying a portrait (so the face never moves); load average 3–5 from u
 | process CPU time | 0.10 s per s | 0.15 s per s | 0.49 s per s |
 | sessions ready, first / cached | 612 / 74 ms | 430 ms / — | — |
 
-The detector alone: 2–4 ms (Core ML), 3 ms (CPU). Both execution providers take every node of both
-models in one partition. The CPU execution provider is the default. On a live face held still at
+The detector alone: 2–4 ms (Core ML), 3 ms (CPU).
+
+**Hands role**, same machine, the file camera replaying the CC0 hand photo (one hand, so the palm
+detector runs every 5th frame), from `STATS_S`:
+
+| per analysed frame | CPU EP (2 threads) | Core ML (Neural Engine) |
+|---|---|---|
+| hand landmarks incl. crop, one hand | 12.1–12.5 ms | 6.3–6.4 ms |
+| palm detector incl. letterbox (when it runs) | 14–15 ms | 6.8–7.2 ms |
+| frame (average) | 14.9–15.6 ms | 7.6–7.9 ms |
+| sessions ready | — | 419 ms (first compile) |
+
+Two hands add one landmark run per frame (not measured: no two-hand fixture). Both models go to
+Core ML in one partition each. Both execution providers take every node of both
+models in one partition. For hands, Core ML is the default on macOS: on a live hand held still at
+about 40 cm, the steadiest 5 s window spread 1.6 / 0.3 / 2.3 mm (x / y / z, standard deviation)
+on Core ML against 7.7 / 1.5 / 6.7 mm on the CPU, and capture to publish fell from about 70 ms to
+58 ms. The viewer role keeps the CPU execution provider as its default: on a live face held still at
 50 cm, the Neural Engine's eye depth jitters 5–6 mm (standard deviation) against 0.4–0.7 mm on
 the CPU, because the Neural Engine runs half precision; sideways and vertical jitter are
 0.4–0.6 mm against 0.2–0.3 mm. `EP=coreml` (Neural Engine) costs about 5× less CPU and leaves
@@ -134,10 +188,10 @@ and the processing time.
 
 ## Model pack
 
-`packs/open-tracking-default.models.json` pins the upstream bundle (MediaPipe
-`face_landmarker.task`, float16 v1, by URL + sha256) and the sha256 + size of each derived ONNX
-blob. **The ONNX bytes are reproducible**: `scripts/fetch_models.py` downloads the bundle, checks
-it, extracts the two `.tflite` models (checked), converts them with tf2onnx (opset 17), then
+`packs/open-tracking-default.models.json` (schema `displayxr-tracking-pack-2`, version 1.1.0)
+pins the upstream bundles (MediaPipe `face_landmarker.task` and `hand_landmarker.task`, float16
+v1, by URL + sha256) and the sha256 + size of each derived ONNX blob. **The ONNX bytes are reproducible**: `scripts/fetch_models.py` downloads the bundles, checks
+them, extracts the four `.tflite` models (checked), converts them with tf2onnx (opset 17), then
 `scripts/mp_onnx.py` fixes every symbolic dimension to 1 (what
 `onnxruntime.tools.make_dynamic_shape_fixed` does, for whatever name tf2onnx gave the batch
 dimension), applies the Core ML graph fix (explicit zero `pads` on Conv / MaxPool, PRelu slopes
@@ -152,8 +206,9 @@ python3.11 -m venv .venv && .venv/bin/pip install -r scripts/requirements-conver
     --test-images models-cache/images
 ```
 
-`models-cache/` then holds `face_detector.onnx`, `face_landmarks.onnx` and the pack — copy them
-next to the provider (or point `MODEL_DIR` at it). `--update-pack` rewrites the pins after a
+`models-cache/` then holds `face_detector.onnx`, `face_landmarks.onnx`, `hand_detector.onnx`,
+`hand_landmarks.onnx` and the pack — copy them next to the provider (or point `MODEL_DIR` at it).
+Each role requires only its own pair (`ot_pack_require`). `--update-pack` rewrites the pins after a
 deliberate converter or model change. `scripts/check_pack.py` validates a pack
 (`--verify-dir DIR` also hashes the blobs).
 
@@ -181,6 +236,12 @@ ctest --test-dir build --output-on-failure
 | `unit-pack` | manifest parsing (and refusals); the repository's pack | no |
 | `negotiate`, `decline-*` | ABI gate, declared settings; probe declines cleanly (ENABLE=0, no models, no camera) | no |
 | `blank`, `face`, `face-coreml` | the fake host drives probe / describe / start / status / stop with the **file camera**: a grey frame (running, nothing pushed, restartable), a public-domain portrait (tracked samples, plausible eyes, the camera block, increasing `capture_ns`, nothing after stop) | yes |
+| `unit-hand-decode`, `unit-hand-roi` | palm anchors + decoding + NMS; the palm and landmark ROIs (rotation, shift toward the fingers, size) | no |
+| `unit-hand-place` | the monocular placement recovers a known hand position to 1 mm and reprojects exactly; depth scales with the size prior; crop → camera axes | no |
+| `unit-hand-chirality`, `unit-hand-joints` | handedness from the 3D shape; the 21 → 26 mapping, -Z along bones, +Y out of the back, a right-handed basis, radii, pinch hysteresis | no |
+| `unit-hands`, `unit-capture-share` | side assignment, display = T + R·p (incl. a pitched camera), velocity, loss; one shared stream per device (file camera) | no |
+| `hands-negotiate`, `hands-decline-*` | the input ABI gate, settings, presence UNKNOWN before probe; probe declines cleanly | no |
+| `hands-blank`, `hands`, `hands-mirror`, `hands-coreml` | through the input ABI with the file camera: two hand trackers on a RIG_LOCAL origin, PRESENT, nothing active on a grey frame; on a CC0 left-hand photo only the left hand, plausible metric joints, thumb side, bone axes (mirrored: the right hand) | yes |
 | `check-pack` | the pack validator | no |
 
 **`otr-probe`** runs the provider on a real camera and prints, every second, samples/s,
@@ -190,7 +251,12 @@ the provider's per-stage timings (stderr):
 
 ```
 build/otr-probe --seconds 15 --still 3 --set MODEL_DIR=$PWD/models-cache [--set EP=cpu] [--set HFOV_DEG=..]
+build/otr-probe --hands --seconds 15 --still 3 --set MODEL_DIR=$PWD/models-cache
 ```
+
+`--hands` drives the hands role instead: it locates both hands' joints at 30 Hz through the
+devices, as an app would, and prints each hand's share of active locates, palm and wrist in
+display space, size and pinch distance, then the palm jitter over the last `--still` seconds.
 
 ## Settings
 
@@ -216,24 +282,47 @@ open-tracking` lists them.
 | `PERMISSION_TIMEOUT_S` | 120 | |
 | `STATS_S` | 0 | > 0: a timing / diagnostics log line every N s |
 
+**Hands role** (`open-tracking-hands`: `DXR_INPUT_OPEN_TRACKING_HANDS_<KEY>`, the per-user store,
+the manifest; `displayxr-cli input options open-tracking-hands`). `DEVICE`, `WIDTH`, `HEIGHT`,
+`FPS`, `HFOV_DEG`, `MIRROR`, `EP`, `COREML_UNITS`, `COREML_CACHE`, `CACHE_DIR`, `MODEL_DIR`,
+`ONNXRUNTIME`, `THREADS`, `ORT_LOG`, `FILTER_*`, `PERMISSION_TIMEOUT_S`, `STATS_S` as above (give
+`DEVICE` and `HFOV_DEG` the viewer role's values: one camera, one stream), except that `EP`
+defaults to `coreml` on macOS (`cpu` elsewhere), plus:
+
+| Key | Default | |
+|---|---|---|
+| `ENABLE` | 1 | 0: probe declines. The camera opens only while an app locates joints |
+| `CONTROLLERS` | 0 | 1: left / right `khr/simple_controller` devices (select = pinch, grip / aim = the palm) that take the controller roles while a camera is present; 0: hand joints only |
+| `MAX_HANDS` | 2 | 1 or 2 |
+| `HAND_SCALE` | 1.0 | the user's hand size relative to the model's average; the depth scales with it |
+| `MAX_DISTANCE_MM` | 800 | a hand whose wrist is farther from the camera is not the user's (someone behind them) and never takes a track; 0 = any distance |
+| `PINCH_ON_MM`, `PINCH_OFF_MM` | 25, 35 | |
+| `DETECT_MIN`, `PRESENCE_MIN`, `DETECT_EVERY` | 0.5, 0.5, 5 | palm detector threshold; landmark presence; with one hand followed, look for the other every N frames |
+| `PREDICT_MAX_MS` | 50 | how far past the newest frame a locate extrapolates |
+| `IDLE_S` | 5 | close the camera this long after the last locate; 0 = never |
+
 ## Registration
 
 POSIX: `NNN-open-tracking-tracking-provider.json` in a plug-in root
 (`examples/manifest/100-open-tracking-tracking-provider.json.in`, ProbeOrder 100 — ahead of the
-simulated provider at 200). Development: put it in a directory with the runtime's sim plug-in
+simulated provider at 200), and for the hands
+`examples/manifest/100-open-tracking-hands-input-provider.json.in` (`NNN-open-tracking-hands-input-provider.json`,
+the same binary). Development: put it in a directory with the runtime's sim plug-in
 manifests and point `XRT_PLUGIN_SEARCH_PATH` at it; `displayxr-cli status --json` then reports
 `viewer_source: "provider:open-tracking"` for a simulated display. Windows:
-`HKLM\Software\DisplayXR\TrackingProviders\open-tracking` (`Binary`, `ProbeOrder`, `Settings`) —
-once the Windows capture exists.
+`HKLM\Software\DisplayXR\TrackingProviders\open-tracking` and
+`HKLM\Software\DisplayXR\InputProviders\open-tracking-hands` (`Binary`, `ProbeOrder`, `Settings`)
+— once the Windows capture exists.
 
 The install tree (`cmake --install build`, with `-DOPENTRACK_INSTALL_MODELS_DIR=models-cache` to
-include the blobs) is flat: the provider, `libonnxruntime`, the pack, the two models, `licenses/`.
+include the blobs) is flat: the provider, `libonnxruntime`, the pack, the four models, `licenses/`.
 
 ## Follow-ups
 
 - Windows capture (Media Foundation; DirectML build of ONNX Runtime) and Linux capture (V4L2).
-- The hands role (`open-tracking-hands`, palm detector + hand landmarks on the same frames, beside
-  `ot_face_tracker`).
+- Hands: a live-camera test (incl. two hands), a per-user hand-size calibration, the display's
+  shared stereo camera as a source, a proper thumb frame; under the service the two roles run in
+  different processes (design §11.7).
 - Installers (`DisplayXROpenTrackingSetup-*.exe`, `.pkg`, `.deb`), the meta-installer's "Tracking
   providers" section, `versions.json` `tracking_open`, signing / the Windows allowlist row.
 - Runtime: spawn `displayxr-tracking-host` with responsibility disclaimed on macOS.
@@ -241,10 +330,27 @@ include the blobs) is flat: the provider, `libonnxruntime`, the pack, the two mo
 
 ## The ABI it builds against
 
-`include/xrt/` is vendored **verbatim** from the runtime at `v2.53.0-17-ge5d7ffa57`
+`include/xrt/` is generated from the runtime's headers at `v2.53.0-17-ge5d7ffa57`
 (`e5d7ffa576833cded4b409105ca7c58b3a62466a`): `xrt_tracking_plugin.h` (viewer-tracking ABI major
-**1**, with the `get_camera_pose` host slot), `xrt_camera_pose.h`, `xrt_component_settings.h`,
-`xrt_results.h`. Update by copying from a runtime release; never edit in place.
+**1**, with the `get_camera_pose` host slot), `xrt_input_plugin.h` (input-provider ABI major **1**,
+with its `get_setting`, `get_display_geometry` and `get_camera_pose` host slots), `xrt_device.h`
+with what it includes (`xrt_defines.h`, `xrt_tracking.h`, `xrt_plane_detector.h`,
+`xrt_visibility_mask.h`, `xrt_limits.h`, `xrt_compiler.h`, `xrt_windows.h`, `xrt_config_os.h`),
+`xrt_camera_pose.h`, `xrt_component_settings.h`, `xrt_results.h`. The copies are vendor-neutral:
+`scripts/neutralize_headers.py` drops the runtime's hardware-specific device, input and output
+names and its vendor-extension face and body types, and writes out the values of the implicitly
+counted enums so nothing the provider exchanges with the runtime moves. CI checks both halves:
+`neutralize_headers.py --check include/xrt` (no vendor names) and `scripts/abi_check.py` against the
+runtime's headers at the pinned commit (every enumerator value, every struct size, every
+`struct xrt_device` offset). To update, regenerate from a runtime release, never edit by hand:
+
+```sh
+python3 scripts/neutralize_headers.py <runtime>/src/xrt/include/xrt include/xrt
+python3 scripts/abi_check.py <runtime>/src/xrt/include
+```
+
+and move `RUNTIME_SHA` in `.github/workflows/build.yml` and the commit above. `struct xrt_device`
+is not versioned by `struct_size`: regenerate and rebuild when the runtime changes it.
 
 ## License
 

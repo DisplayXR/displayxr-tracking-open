@@ -230,6 +230,10 @@ ot_capture_request_access(uint32_t timeout_ms, volatile bool *cancel)
 	return ot_capture_platform_request_access(timeout_ms, cancel);
 }
 
+// The streams this process has open, by locator (ot_capture.h: one per device, shared).
+static ot_mutex g_shared_lock = OT_MUTEX_INITIALIZER;
+static struct ot_capture *g_shared = NULL;
+
 bool
 ot_capture_open(const struct ot_camera_info *cam,
                 const struct ot_capture_request *req,
@@ -237,10 +241,28 @@ ot_capture_open(const struct ot_camera_info *cam,
                 char *err,
                 size_t err_size)
 {
-	if (strncmp(cam->locator, "file:", 5) == 0) {
-		return ot_capture_file_open(cam->locator + 5, req, out, err, err_size);
+	ot_lock(&g_shared_lock);
+	for (struct ot_capture *c = g_shared; c != NULL; c = c->next_shared) {
+		if (strcmp(c->locator, cam->locator) == 0 && !ot_mailbox_lost(c->mb)) {
+			c->refs++;
+			*out = c;
+			ot_unlock(&g_shared_lock);
+			return true;
+		}
 	}
-	return ot_capture_platform_open(cam, req, out, err, err_size);
+	// Opening under the lock: a second role asking at the same moment waits for this stream instead of
+	// opening the device twice.
+	const bool ok = strncmp(cam->locator, "file:", 5) == 0
+	                    ? ot_capture_file_open(cam->locator + 5, req, out, err, err_size)
+	                    : ot_capture_platform_open(cam, req, out, err, err_size);
+	if (ok) {
+		ot_copy_str((*out)->locator, sizeof((*out)->locator), cam->locator);
+		(*out)->refs = 1;
+		(*out)->next_shared = g_shared;
+		g_shared = *out;
+	}
+	ot_unlock(&g_shared_lock);
+	return ok;
 }
 
 void
@@ -275,6 +297,19 @@ ot_capture_close(struct ot_capture *c)
 	if (c == NULL) {
 		return;
 	}
+	ot_lock(&g_shared_lock);
+	if (c->refs > 1) {
+		c->refs--;
+		ot_unlock(&g_shared_lock);
+		return;
+	}
+	for (struct ot_capture **p = &g_shared; *p != NULL; p = &(*p)->next_shared) {
+		if (*p == c) {
+			*p = c->next_shared;
+			break;
+		}
+	}
+	ot_unlock(&g_shared_lock);
 	if (c->ops != NULL && c->ops->close != NULL) {
 		c->ops->close(c);
 	}

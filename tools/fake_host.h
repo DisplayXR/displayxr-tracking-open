@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  A stand-in for the runtime's tracking host: loads a provider binary
- *         by path, negotiates, serves settings / display geometry / the camera
- *         pose (the runtime's default prior), and records what the provider
- *         pushes into its sink. Used by the CTest driver and by otr-probe.
+ * @brief  A stand-in for the runtime's tracking host and input-provider host:
+ *         loads a provider binary by path, negotiates either role, serves
+ *         settings / display geometry / the camera pose (the runtime's default
+ *         prior), and records what the viewer role pushes into its sink. Used
+ *         by the CTest driver and by otr-probe.
  */
 
 #pragma once
 
+#include "xrt/xrt_input_plugin.h"
 #include "xrt/xrt_tracking_plugin.h"
 
 #include <stdbool.h>
@@ -50,6 +52,17 @@ fh_set(const char *kv);
  */
 xrt_result_t
 fh_load(const char *path, const struct fh_config *cfg, uint32_t api_version, struct xrt_tracking_plugin_iface **out_iface);
+
+/*!
+ * Load @p path and negotiate its INPUT-provider entry point (the hands role)
+ * with @p api_version, serving the same settings, display geometry and camera
+ * pose. Both roles may be loaded into one process (the same library image).
+ */
+xrt_result_t
+fh_load_input(const char *path,
+              const struct fh_config *cfg,
+              uint32_t api_version,
+              struct xrt_input_plugin_iface **out_iface);
 
 //! The sink to pass to start().
 const struct xrt_tracking_sink *

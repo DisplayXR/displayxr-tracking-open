@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 # Copyright 2026, The DisplayXR Project
 # SPDX-License-Identifier: BSL-1.0
-"""Download the pinned upstream MediaPipe bundle, convert its face models to
-ONNX reproducibly, and check every blob against the pack.
+"""Download the pinned upstream MediaPipe bundles (face landmarker, hand
+landmarker), convert their models to ONNX reproducibly, and check every blob
+against the pack.
 
     fetch_models.py PACK DIR [--cache DIR] [--update-pack] [--test-images DIR]
 
   PACK            packs/open-tracking-default.models.json
   DIR             where the ONNX blobs and a copy of the pack land (the
                   provider's MODEL_DIR; next to the provider binary by default)
-  --cache DIR     keep the downloaded .task here (default: DIR/.cache)
+  --cache DIR     keep the downloaded .task bundles here (default: DIR/.cache)
   --update-pack   write the sha256 / size this run produced into PACK instead
                   of checking them (maintainers, when a pin changes)
-  --test-images   also fetch the public-domain test photos the fake-host face
-                  test uses and write them as binary PPM into that directory
+  --test-images   also fetch the public-domain / CC0 test photos the fake-host
+                  inference tests use (a face, a hand) and write them as binary
+                  PPM into that directory (downscaled to "max_side" when the pack
+                  says so)
 
 For development, CI and the release build. Needs the pinned converter
 environment (scripts/requirements-convert.txt, Python 3.11): the ONNX bytes
 depend on the tf2onnx / tensorflow / onnx / protobuf versions, so the pack
 records them and this script refuses to run with others unless --update-pack.
 
-Pipeline per model: unzip the .tflite from the .task (sha256-checked) ->
+Pipeline per model: unzip the .tflite from its source .task (sha256-checked) ->
 tf2onnx (opset 17) -> scripts/mp_onnx.py (symbolic dims fixed to 1, Core ML
 graph fix, canonical names) -> sha256 / size check against the pack.
 Nothing is written under its final name before it verified.
@@ -40,6 +43,7 @@ import urllib.request
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+USER_AGENT = "displayxr-tracking-open-fetch-models/1.1 (+https://github.com/DisplayXR/displayxr-tracking-open)"
 sys.path.insert(0, HERE)
 
 
@@ -60,7 +64,9 @@ def download(url, dst, sha, size, attempts=8):
     for i in range(attempts):
         try:
             print("get  %s" % url)
-            with urllib.request.urlopen(url, timeout=120) as r, open(tmp, "wb") as out:
+            # Some hosts (Wikimedia) refuse urllib's default User-Agent; say who we are.
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as out:
                 shutil.copyfileobj(r, out, 1 << 20)
             got = sha256_file(tmp)
             if got != sha or (size and os.path.getsize(tmp) != size):
@@ -90,9 +96,13 @@ def check_versions(conv, strict):
         print("warning: " + b)
 
 
-def to_ppm(src, dst):
+def to_ppm(src, dst, max_side=0):
     from PIL import Image
-    Image.open(src).convert("RGB").save(dst, format="PPM")
+    im = Image.open(src).convert("RGB")
+    if max_side and max(im.size) > max_side:
+        k = max_side / float(max(im.size))
+        im = im.resize((max(1, round(im.size[0] * k)), max(1, round(im.size[1] * k))), Image.Resampling.LANCZOS)
+    im.save(dst, format="PPM")
 
 
 def main():
@@ -115,22 +125,25 @@ def main():
         for img in pack.get("test_images", []):
             raw = os.path.join(cache, img["sha256"] + os.path.splitext(img["url"])[1])
             download(img["url"], raw, img["sha256"], img.get("size", 0))
-            to_ppm(raw, os.path.join(args.test_images, img["name"] + ".ppm"))
+            to_ppm(raw, os.path.join(args.test_images, img["name"] + ".ppm"), img.get("max_side", 0))
             print("ok   test image %s.ppm" % img["name"])
 
     conv = pack["conversion"]
     check_versions(conv, strict=not args.update_pack)
     import mp_onnx  # needs onnx + onnxruntime from the converter environment
 
-    src = pack["source"]
-    task = os.path.join(cache, src["sha256"] + ".task")
-    download(src["url"], task, src["sha256"], src["size"])
+    tasks = {}
+    for src in pack["sources"]:
+        tasks[src["name"]] = os.path.join(cache, src["sha256"] + ".task")
+        download(src["url"], tasks[src["name"]], src["sha256"], src["size"])
 
     failures = 0
-    with tempfile.TemporaryDirectory() as work, zipfile.ZipFile(task) as z:
+    with tempfile.TemporaryDirectory() as work:
         for m in pack["models"]:
+            if m.get("source") not in tasks:
+                raise SystemExit("model %s names an unknown source %r" % (m["role"], m.get("source")))
             tfl = os.path.join(work, m["from"])
-            with z.open(m["from"]) as fi, open(tfl, "wb") as fo:
+            with zipfile.ZipFile(tasks[m["source"]]) as z, z.open(m["from"]) as fi, open(tfl, "wb") as fo:
                 shutil.copyfileobj(fi, fo)
             if sha256_file(tfl) != m["from_sha256"]:
                 raise SystemExit("%s in the .task does not match from_sha256" % m["from"])
