@@ -238,6 +238,21 @@ ot_hand_joints_from_landmarks(const float (*p)[3], bool is_left, struct ot_hand_
 		back[2] = -back[2];
 	}
 
+	// The thumb's nail does not face the back of the hand: the thumb sits rotated about its own axis,
+	// its nail turned toward the radial side (the index finger's side). Its +Y blends the two; the
+	// radial direction, little -> index knuckle, needs no handedness.
+	float thumb_up[3], radial[3];
+	sub3(p[OT_HL_INDEX_MCP], p[OT_HL_PINKY_MCP], radial);
+	if (!normalize3(radial)) {
+		memcpy(radial, back, sizeof(radial));
+	}
+	for (int c = 0; c < 3; c++) {
+		thumb_up[c] = back[c] + radial[c];
+	}
+	if (!normalize3(thumb_up)) {
+		memcpy(thumb_up, back, sizeof(thumb_up));
+	}
+
 	// Orientations: each joint looks along the bone that starts at it; tips along the last bone.
 	float fwd[3];
 	sub3(p[OT_HL_MIDDLE_MCP], p[OT_HL_WRIST], fwd);
@@ -251,7 +266,7 @@ ot_hand_joints_from_landmarks(const float (*p)[3], bool is_left, struct ot_hand_
 		} else {
 			sub3(out->pos[j + 1], out->pos[j], fwd);
 		}
-		frame_quat(fwd, back, out->rot[j]);
+		frame_quat(fwd, j <= OT_HJ_THUMB_TIP ? thumb_up : back, out->rot[j]);
 	}
 
 	// Radii, nominal adult hand (metres), scaled by this hand's size.

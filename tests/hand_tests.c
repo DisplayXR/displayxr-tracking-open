@@ -358,6 +358,15 @@ test_joints(void)
 		back = back && y[2] > 0.0f;
 	}
 	check(back, "every finger joint's +Y on the back-of-hand side");
+	// The thumb's nail turns toward the radial side (the thumb is on -X for this right hand).
+	bool thumb = true;
+	for (int jj = OT_HJ_THUMB_METACARPAL; jj <= OT_HJ_THUMB_TIP; jj++) {
+		axis(j.rot[jj], 1, y);
+		thumb = thumb && y[2] > 0.2f && y[0] < -0.2f;
+	}
+	axis(j.rot[OT_HJ_THUMB_PROXIMAL], 1, y);
+	check(thumb, "the thumb's +Y between the back of the hand and the radial side (%.2f, %.2f, %.2f)", y[0],
+	      y[1], y[2]);
 
 	// The left hand (the mirror image): its back faces the user too.
 	float m[OT_HAND_LM_COUNT][3];
@@ -367,6 +376,9 @@ test_joints(void)
 	ot_hand_joints_from_landmarks((const float(*)[3])m, true, &jl);
 	axis(jl.rot[OT_HJ_PALM], 1, y);
 	check(y[2] > 0.95f, "left hand: palm +Y toward the user too (%.3f)", y[2]);
+	axis(jl.rot[OT_HJ_THUMB_PROXIMAL], 1, y);
+	check(y[2] > 0.2f && y[0] > 0.2f, "left hand: the thumb's +Y toward its radial side, +X (%.2f, %.2f)", y[0],
+	      y[2]);
 
 	// Radii: plausible, and they scale with the hand.
 	bool ok = true;
