@@ -77,7 +77,8 @@ Same binary, its own thread, started by the first joint locate (design §11). Pe
    previous frame's landmarks (tracking mode, long side × 2). Out: 21 landmarks, presence,
    handedness, and 21 metric "world" landmarks. Presence below `PRESENCE_MIN` drops the hand.
 3. **Left or right**: the handedness output is P(the subject's right hand) on the un-mirrored
-   image, averaged over the track; with two hands the more "right" one is right.
+   image, averaged over the track; with two hands the more "right" one is right. A hand keeps its
+   side until its evidence clearly says otherwise (P(right) past 0.25 / 0.75).
 4. **Depth, an estimate from hand size**: the metric hand (× `HAND_SCALE`) is placed along the
    landmarks' pixel rays by linear least squares, each landmark then on its own ray at that depth
    (exact 2D reprojection). A hand 10 % larger than the model's average reads 10 % farther.

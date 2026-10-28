@@ -461,6 +461,31 @@ test_hands(void)
 	ot_hands_assign(&r, idx);
 	check(idx[OT_SIDE_LEFT] == 0 && idx[OT_SIDE_RIGHT] == -1, "one hand at 0.4: left");
 
+	// Sticky sides: track 3 holds the right side.
+	struct ot_hands held;
+	ot_hands_reset(&held);
+	held.have[OT_SIDE_RIGHT] = true;
+	held.track[OT_SIDE_RIGHT] = 3;
+	memset(&r, 0, sizeof(r));
+	r.count = 1;
+	r.hands[0].track_id = 3;
+	r.hands[0].right_mean = 0.45f;
+	ot_hands_assign_sticky(&held, &r, idx);
+	check(idx[OT_SIDE_RIGHT] == 0, "sticky: a held right hand turned edge-on (0.45) stays right");
+	r.hands[0].right_mean = 0.2f;
+	ot_hands_assign_sticky(&held, &r, idx);
+	check(idx[OT_SIDE_LEFT] == 0 && idx[OT_SIDE_RIGHT] == -1, "sticky: clear evidence (0.2) still flips it");
+	r.count = 2;
+	r.hands[0].right_mean = 0.55f;
+	r.hands[1].track_id = 9;
+	r.hands[1].right_mean = 0.7f;
+	ot_hands_assign_sticky(&held, &r, idx);
+	check(idx[OT_SIDE_RIGHT] == 0 && idx[OT_SIDE_LEFT] == 1,
+	      "sticky: a second hand arriving does not take the held hand's side");
+	r.hands[0].track_id = 4;
+	ot_hands_assign_sticky(&held, &r, idx);
+	check(idx[OT_SIDE_RIGHT] == 1 && idx[OT_SIDE_LEFT] == 0, "sticky: no held track -> by handedness");
+
 	// A right hand 45 cm in front of a camera at the top centre of the bezel.
 	struct ot_intrinsics k;
 	ot_intrinsics_from_hfov(1280, 720, 70.0f, &k);
