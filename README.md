@@ -166,7 +166,10 @@ detector runs every 5th frame), from `STATS_S`:
 
 Two hands add one landmark run per frame (not measured: no two-hand fixture). Both models go to
 Core ML in one partition each. Both execution providers take every node of both
-models in one partition. The CPU execution provider is the default. On a live face held still at
+models in one partition. For hands, Core ML is the default on macOS: on a live hand held still at
+about 40 cm, the steadiest 5 s window spread 1.6 / 0.3 / 2.3 mm (x / y / z, standard deviation)
+on Core ML against 7.7 / 1.5 / 6.7 mm on the CPU, and capture to publish fell from about 70 ms to
+58 ms. The viewer role keeps the CPU execution provider as its default: on a live face held still at
 50 cm, the Neural Engine's eye depth jitters 5–6 mm (standard deviation) against 0.4–0.7 mm on
 the CPU, because the Neural Engine runs half precision; sideways and vertical jitter are
 0.4–0.6 mm against 0.2–0.3 mm. `EP=coreml` (Neural Engine) costs about 5× less CPU and leaves
@@ -283,7 +286,8 @@ open-tracking` lists them.
 the manifest; `displayxr-cli input options open-tracking-hands`). `DEVICE`, `WIDTH`, `HEIGHT`,
 `FPS`, `HFOV_DEG`, `MIRROR`, `EP`, `COREML_UNITS`, `COREML_CACHE`, `CACHE_DIR`, `MODEL_DIR`,
 `ONNXRUNTIME`, `THREADS`, `ORT_LOG`, `FILTER_*`, `PERMISSION_TIMEOUT_S`, `STATS_S` as above (give
-`DEVICE` and `HFOV_DEG` the viewer role's values: one camera, one stream), plus:
+`DEVICE` and `HFOV_DEG` the viewer role's values: one camera, one stream), except that `EP`
+defaults to `coreml` on macOS (`cpu` elsewhere), plus:
 
 | Key | Default | |
 |---|---|---|

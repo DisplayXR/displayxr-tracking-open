@@ -50,6 +50,17 @@
 #define OTH_ID "open-tracking-hands"
 #define OTH_VERSION "0.2.0"
 
+/*
+ * Hands default to Core ML on macOS: live, a palm held still jitters no more than on the CPU (1.6 / 0.3 /
+ * 2.3 mm against 7.7 / 1.5 / 6.7 mm, x / y / z), at half the cost per frame. The viewer role stays on the
+ * CPU, where the Neural Engine's half precision costs the eye depth 5-6 mm.
+ */
+#ifdef __APPLE__
+#define OTH_EP_DEFAULT "coreml"
+#else
+#define OTH_EP_DEFAULT "cpu"
+#endif
+
 
 /*
  *
@@ -88,7 +99,7 @@ static const struct xrt_component_setting_desc g_descs[] = {
      "how far ahead of the newest frame a locate may extrapolate (the palm's velocity), ms"},
     {"IDLE_S", XRT_COMPONENT_SETTING_TYPE_INT, "5",
      "close the camera this long after the last joint locate; 0 = keep it open once started"},
-    {"EP", XRT_COMPONENT_SETTING_TYPE_ENUM, "cpu", "cpu | coreml (macOS)"},
+    {"EP", XRT_COMPONENT_SETTING_TYPE_ENUM, OTH_EP_DEFAULT, "cpu | coreml (macOS; the default there)"},
     {"COREML_UNITS", XRT_COMPONENT_SETTING_TYPE_ENUM, "ane", "ane | gpu | all | cpu (EP=coreml)"},
     {"COREML_CACHE", XRT_COMPONENT_SETTING_TYPE_BOOL, "1", "1: keep Core ML's compiled models in the user cache"},
     {"CACHE_DIR", XRT_COMPONENT_SETTING_TYPE_STRING, "", "cache root (default: the per-user cache directory)"},
@@ -215,7 +226,7 @@ read_config(struct oth_config *c)
 	c->mirror = setting_bool("MIRROR", false);
 	c->controllers = setting_bool("CONTROLLERS", false);
 	if (!setting("EP", c->ep, sizeof(c->ep))) {
-		ot_copy_str(c->ep, sizeof(c->ep), "cpu");
+		ot_copy_str(c->ep, sizeof(c->ep), OTH_EP_DEFAULT);
 	}
 	char v[32];
 	c->units = OT_COREML_ANE;
