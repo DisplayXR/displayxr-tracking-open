@@ -86,8 +86,8 @@ Same binary, its own thread, started by the first joint locate (design §11). Pe
    One Euro filter per coordinate.
 6. **26 joints** (`XR_EXT_hand_tracking` order): the 20 measured joints one to one; synthesised:
    each finger's metacarpal joint a quarter of the way wrist → knuckle, the palm at the middle of
-   the middle metacarpal. -Z along each bone toward the fingertip, +Y out of the back of the hand,
-   radii from a nominal adult hand scaled by this hand's size. Pinch: thumb tip to index tip below
+   the middle metacarpal. -Z along each bone toward the fingertip, +Y out of the back of the hand
+   (the thumb's turned toward the index side), radii from a nominal adult hand scaled by this hand's size. Pinch: thumb tip to index tip below
    25 mm (released above 35 mm).
 7. **Published** on two `XRT_DEVICE_TYPE_HAND_TRACKER` devices (`XRT_INPUT_HT_UNOBSTRUCTED_LEFT /
    RIGHT`) whose origin is `XRT_TRACKING_TYPE_RIG_LOCAL` (display-plane relative): the runtime

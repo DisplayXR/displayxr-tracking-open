@@ -322,7 +322,8 @@ step for it is open). The focal length comes from `HFOV_DEG` × the camera pose'
   the middle of the middle finger's metacarpal bone, as the extension defines it.
 - **Orientation.** -Z along the bone that starts at the joint (tips: the last bone; wrist and palm:
   toward the middle knuckle), +Y out of the back of the hand (from the knuckle plane and the
-  handedness), X = Y × Z. The thumb uses the hand's back as its up vector, an approximation.
+  handedness), X = Y × Z. The thumb sits rotated about its own axis, so its +Y blends the back of
+  the hand with the radial direction (little → index knuckle), its nail turned toward the index side.
 - **Radii.** A nominal adult hand's (fingertips 6–8 mm, palm 16 mm, wrist 20 mm), scaled by the
   measured wrist → middle-knuckle length.
 - **Filtering.** One Euro per coordinate of the 21 points in display space, restarted on a new
