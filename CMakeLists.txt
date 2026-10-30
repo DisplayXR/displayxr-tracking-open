@@ -116,6 +116,8 @@ add_custom_command(TARGET ${OPENTRACK_PROVIDER} POST_BUILD
 install(TARGETS ${OPENTRACK_PROVIDER} LIBRARY DESTINATION . RUNTIME DESTINATION .)
 install(FILES ${_ship} DESTINATION .)
 install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION licenses)
+# The models are Apache-2.0 (Google LLC, MediaPipe): their redistribution carries the licence text.
+install(FILES licenses/Apache-2.0.txt DESTINATION licenses RENAME mediapipe-models-Apache-2.0.txt)
 list(LENGTH OPENTRACK_ORT_LICENSE_FILES _n)
 math(EXPR _last "${_n} - 1")
 foreach(_i RANGE ${_last})

@@ -229,14 +229,34 @@ once the Windows capture exists.
 The install tree (`cmake --install build`, with `-DOPENTRACK_INSTALL_MODELS_DIR=models-cache` to
 include the blobs) is flat: the provider, `libonnxruntime`, the pack, the two models, `licenses/`.
 
+### macOS installer
+
+`DisplayXR-OpenTracking-X.Y.Z.pkg` (a release asset; built by `.github/workflows/release.yml` on a
+`vX.Y.Z` tag, Developer ID signed + notarized) installs the manifest into the runtime's system
+discovery root and the flat tree beside the runtime's plug-ins:
+
+```
+/Library/Application Support/DisplayXR/DisplayProcessors/100-open-tracking-tracking-provider.json
+/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/
+```
+
+Root-owned under `/Library/Application Support/DisplayXR`, so the installed runtime treats it as
+platform-trusted: no `XRT_PLUGIN_SEARCH_PATH`, no `DXR_ALLOW_DEV_PLUGIN_PATHS`. It refuses to install
+over a runtime older than `MIN_RUNTIME` (the first whose tracking host may open the camera). Then:
+`displayxr-cli status` (viewer source `provider:open-tracking`), allow the camera when macOS asks
+(the prompt names DisplayXR's tracking host), and `displayxr-cli tracking calibrate` for the camera
+pose (stored in `~/.config/monado/camera-calibration.json`). Remove with
+`sudo "/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/uninstall.sh"`.
+Build one locally: `scripts/package_macos.sh <install-tree> <version> <out.pkg>` with `SIGN`
+pointing at the runtime's `scripts/macos_sign_notarize.sh` (ad-hoc without signing identities).
+
 ## Follow-ups
 
 - Windows capture (Media Foundation; DirectML build of ONNX Runtime) and Linux capture (V4L2).
 - The hands role (`open-tracking-hands`, palm detector + hand landmarks on the same frames, beside
   `ot_face_tracker`).
-- Installers (`DisplayXROpenTrackingSetup-*.exe`, `.pkg`, `.deb`), the meta-installer's "Tracking
+- Installers (`DisplayXROpenTrackingSetup-*.exe`, `.deb`; the macOS `.pkg` ships), the meta-installer's "Tracking
   providers" section, `versions.json` `tracking_open`, signing / the Windows allowlist row.
-- Runtime: spawn `displayxr-tracking-host` with responsibility disclaimed on macOS.
 - Camera intrinsics: a per-camera HFOV / distortion table, or a calibration step.
 
 ## The ABI it builds against

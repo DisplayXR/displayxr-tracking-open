@@ -1,0 +1,148 @@
+# Copyright 2026, The DisplayXR Project
+# SPDX-License-Identifier: BSL-1.0
+#
+# macOS release: on a vX.Y.Z tag, build the provider (arm64, Release), convert the models from
+# the pinned upstream bundle (bit-identical to the pack), package them as
+# DisplayXR-OpenTracking-X.Y.Z.pkg (scripts/package_macos.sh), sign + notarize + staple it with
+# the DisplayXR org's Developer ID, and attach it to the GitHub Release.
+# workflow_dispatch builds the same .pkg as an artifact without releasing (signed when the
+# secrets are present), for a test install.
+#
+# Signing uses the runtime's scripts/macos_sign_notarize.sh, fetched at a pinned tag and checked
+# against its sha256. The org secrets enter the environment in one step only. A build without
+# them is an unsigned .pkg; a TAG build without them fails, because an unsigned provider .pkg
+# is refused by Gatekeeper and must never be released.
+
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version for the test .pkg (X.Y.Z)'
+        required: true
+        default: '0.0.0'
+
+permissions:
+  contents: write
+
+env:
+  # The oldest runtime whose displayxr-tracking-host carries the camera entitlement + usage
+  # string: an older host cannot open the camera, so the .pkg refuses to install over it.
+  MIN_RUNTIME: '2.58.0'
+  SIGN_SCRIPT_TAG: 'v2.57.4'
+  SIGN_SCRIPT_SHA256: 'd8a5902ddaff1b49829cfe321c1d0ee9edbc79f806a591facf4d49c1468d5bf3'
+
+jobs:
+  macos:
+    name: macOS .pkg
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="${{ inputs.version }}"; fi
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::bad version '$v'"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the signing script (pinned)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/macos_sign_notarize.sh" \
+            "https://raw.githubusercontent.com/DisplayXR/displayxr-runtime/${SIGN_SCRIPT_TAG}/scripts/macos_sign_notarize.sh"
+          echo "${SIGN_SCRIPT_SHA256}  $RUNNER_TEMP/macos_sign_notarize.sh" | shasum -a 256 -c -
+          chmod +x "$RUNNER_TEMP/macos_sign_notarize.sh"
+          echo "SIGN=$RUNNER_TEMP/macos_sign_notarize.sh" >> "$GITHUB_ENV"
+
+      - name: Cache pinned archives and the upstream bundle
+        uses: actions/cache@v4
+        with:
+          path: |
+            downloads
+            models-cache/.cache
+          key: release-${{ hashFiles('cmake/OnnxRuntime.cmake', 'packs/*.json') }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Convert the models (bit-identical to the pack)
+        run: |
+          python -m pip install -r scripts/requirements-convert.txt
+          python -s -P scripts/fetch_models.py packs/open-tracking-default.models.json models-cache
+
+      - name: Build + install tree
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPENTRACK_WERROR=ON \
+            -DOPENTRACK_BUILD_TESTS=OFF -DOPENTRACK_BUILD_PROBE=OFF \
+            -DOPENTRACK_DOWNLOAD_DIR="${{ github.workspace }}/downloads" \
+            -DOPENTRACK_INSTALL_MODELS_DIR="${{ github.workspace }}/models-cache"
+          cmake --build build
+          cmake --install build --prefix dist
+          ls -la dist
+
+      - name: Import signing identities into a temporary keychain
+        id: keychain
+        env:
+          MACOS_APP_CERT_P12: ${{ secrets.MACOS_APP_CERT_P12 }}
+          MACOS_APP_CERT_PASSWORD: ${{ secrets.MACOS_APP_CERT_PASSWORD }}
+          MACOS_INSTALLER_CERT_P12: ${{ secrets.MACOS_INSTALLER_CERT_P12 }}
+          MACOS_INSTALLER_CERT_PASSWORD: ${{ secrets.MACOS_INSTALLER_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          if ! MISSING=$("$SIGN" ci-secrets-check); then
+            if [ "${GITHUB_REF_TYPE}" = tag ]; then
+              echo "::error::signing secrets not available to this repo: $MISSING — a release .pkg must be signed."
+              exit 1
+            fi
+            echo "::notice::signing skipped (secrets missing: $MISSING); the test .pkg is unsigned."
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          "$SIGN" ci-keychain-setup --env-out "$GITHUB_ENV"
+          echo "sign=true" >> "$GITHUB_OUTPUT"
+
+      - name: Package, sign, notarize, staple
+        run: |
+          PKG="DisplayXR-OpenTracking-${{ steps.ver.outputs.version }}.pkg"
+          scripts/package_macos.sh dist "${{ steps.ver.outputs.version }}" "$PKG" --min-runtime "$MIN_RUNTIME"
+          if [ "${{ steps.keychain.outputs.sign }}" = true ]; then "$SIGN" verify-pkg "$PKG"; fi
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+
+      - name: Payload check
+        run: |
+          set -euo pipefail
+          X=$(mktemp -d); pkgutil --expand-full "$PKG" "$X/x"
+          P=$(find "$X/x" -type d -name Payload | head -1)
+          D="$P/Library/Application Support/DisplayXR"
+          test -f "$D/DisplayProcessors/100-open-tracking-tracking-provider.json"
+          for f in DisplayXR-OpenTracking.dylib open-tracking-default.models.json face_detector.onnx face_landmarks.onnx licenses/LICENSE licenses/THIRD_PARTY_NOTICES.md licenses/mediapipe-models-Apache-2.0.txt licenses/onnxruntime-LICENSE.txt; do
+            test -e "$D/lib/displayxr/plugins/open-tracking/$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          ls "$D/lib/displayxr/plugins/open-tracking/"libonnxruntime*.dylib
+          grep -q '"binary_path":  "/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/DisplayXR-OpenTracking.dylib"' \
+            "$D/DisplayProcessors/100-open-tracking-tracking-provider.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-tracking-macos-pkg
+          path: ${{ env.PKG }}
+          if-no-files-found: error
+
+      - name: GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$PKG" --title "DisplayXR Open Tracking $GITHUB_REF_NAME" \
+            --notes "macOS (Apple silicon) installer for the open camera tracking provider: head and eye tracking from the built-in camera. Requires DisplayXR runtime ${MIN_RUNTIME} or later. Installs into /Library/Application Support/DisplayXR; remove with \`sudo \"/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/uninstall.sh\"\`. Models: MediaPipe Face Landmarker (Apache-2.0); ONNX Runtime (MIT); see licenses/."
+
+      - name: Tear down the keychain
+        if: always()
+        run: '[ -z "${SIGN:-}" ] || "$SIGN" ci-keychain-teardown || true'

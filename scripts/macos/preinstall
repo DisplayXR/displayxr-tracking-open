@@ -1,0 +1,20 @@
+#!/bin/bash
+# Copyright 2026, The DisplayXR Project
+# SPDX-License-Identifier: BSL-1.0
+#
+# The provider runs inside the runtime's displayxr-tracking-host. That host can open a camera
+# only from a runtime whose host is signed with the camera entitlement, so refuse an older (or
+# missing) runtime instead of installing a provider that silently never tracks.
+MIN="@MIN_RUNTIME@"
+[ -n "$MIN" ] || exit 0
+HAVE="$(pkgutil --pkg-info com.displayxr.runtime 2>/dev/null | awk '/^version:/{print $2}')"
+if [ -z "$HAVE" ]; then
+	echo "DisplayXR Open Tracking needs the DisplayXR runtime $MIN or later; no runtime is installed." >&2
+	exit 1
+fi
+lowest="$(printf '%s\n%s\n' "$MIN" "${HAVE%%-*}" | sort -V | head -1)"
+if [ "$lowest" != "$MIN" ]; then
+	echo "DisplayXR Open Tracking needs the DisplayXR runtime $MIN or later; $HAVE is installed." >&2
+	exit 1
+fi
+exit 0
