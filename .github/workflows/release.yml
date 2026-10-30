@@ -18,6 +18,15 @@ name: release
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  # A PR that touches the packaging builds the .pkg too (signed + notarized when the org secrets
+  # reach it, i.e. not from a fork), so the release path is proven before a tag.
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'scripts/package_macos.sh'
+      - 'scripts/macos/**'
+      - 'packs/**'
+      - 'CMakeLists.txt'
   workflow_dispatch:
     inputs:
       version:
@@ -45,7 +54,7 @@ jobs:
       - name: Version
         id: ver
         run: |
-          if [ "${GITHUB_REF_TYPE}" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="${{ inputs.version }}"; fi
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="${{ inputs.version || '0.0.0' }}"; fi
           echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::bad version '$v'"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
