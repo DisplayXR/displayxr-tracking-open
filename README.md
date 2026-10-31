@@ -242,7 +242,9 @@ discovery root and the flat tree beside the runtime's plug-ins:
 
 Root-owned under `/Library/Application Support/DisplayXR`, so the installed runtime treats it as
 platform-trusted: no `XRT_PLUGIN_SEARCH_PATH`, no `DXR_ALLOW_DEV_PLUGIN_PATHS`. It refuses to install
-over a runtime older than `MIN_RUNTIME` (the first whose tracking host may open the camera). Then:
+over a runtime older than `MIN_RUNTIME` (the first whose tracking host may open the camera), and
+restarts a running DisplayXR service afterwards (the service looks for a provider only when it
+starts; the uninstaller restarts it too). Then:
 `displayxr-cli status` (viewer source `provider:open-tracking`), allow the camera when macOS asks
 (the prompt names DisplayXR's tracking host), and `displayxr-cli tracking calibrate` for the camera
 pose (stored in `~/.config/monado/camera-calibration.json`). Remove with
