@@ -1,0 +1,17 @@
+#!/bin/bash
+# Copyright 2026, The DisplayXR Project
+# SPDX-License-Identifier: BSL-1.0
+#
+# The runtime's service scans for a tracking provider once, when it starts. A service that is
+# already running when this package lands has recorded "no provider" and would ignore this one
+# until the next login, so restart it (only if it is loaded; a stopped service scans at its next
+# start anyway). Runs as root: target the console user's GUI domain.
+CONSOLE_USER="$(stat -f%Su /dev/console 2>/dev/null || true)"
+[ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != root ] || exit 0
+CONSOLE_UID="$(id -u "$CONSOLE_USER" 2>/dev/null || true)"
+[ -n "$CONSOLE_UID" ] || exit 0
+if launchctl print "gui/$CONSOLE_UID/com.displayxr.service" >/dev/null 2>&1; then
+	launchctl kickstart -k "gui/$CONSOLE_UID/com.displayxr.service" >/dev/null 2>&1 || true
+	echo "DisplayXR Open Tracking: restarted the DisplayXR service so it finds the provider."
+fi
+exit 0

@@ -74,6 +74,7 @@ SCRIPTS="$WORK/scripts"
 mkdir -p "$SCRIPTS"
 sed -e "s|@MIN_RUNTIME@|$MIN_RUNTIME|" "$HERE/scripts/macos/preinstall" > "$SCRIPTS/preinstall"
 chmod 0755 "$SCRIPTS/preinstall"
+install -m 0755 "$HERE/scripts/macos/postinstall" "$SCRIPTS/postinstall"
 
 COMPONENT="$WORK/open-tracking.pkg"
 pkgbuild --root "$WORK/root" --install-location / --ownership recommended \
