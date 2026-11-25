@@ -131,12 +131,15 @@ jobs:
           P=$(find "$X/x" -type d -name Payload | head -1)
           D="$P/Library/Application Support/DisplayXR"
           test -f "$D/DisplayProcessors/100-open-tracking-tracking-provider.json"
-          for f in DisplayXR-OpenTracking.dylib open-tracking-default.models.json face_detector.onnx face_landmarks.onnx licenses/LICENSE licenses/THIRD_PARTY_NOTICES.md licenses/mediapipe-models-Apache-2.0.txt licenses/onnxruntime-LICENSE.txt; do
+          test -f "$D/DisplayProcessors/100-open-tracking-hands-input-provider.json"
+          for f in DisplayXR-OpenTracking.dylib open-tracking-default.models.json face_detector.onnx face_landmarks.onnx hand_detector.onnx hand_landmarks.onnx licenses/LICENSE licenses/THIRD_PARTY_NOTICES.md licenses/mediapipe-models-Apache-2.0.txt licenses/onnxruntime-LICENSE.txt; do
             test -e "$D/lib/displayxr/plugins/open-tracking/$f" || { echo "::error::missing $f"; exit 1; }
           done
           ls "$D/lib/displayxr/plugins/open-tracking/"libonnxruntime*.dylib
-          grep -q '"binary_path":  "/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/DisplayXR-OpenTracking.dylib"' \
-            "$D/DisplayProcessors/100-open-tracking-tracking-provider.json"
+          for m in 100-open-tracking-tracking-provider.json 100-open-tracking-hands-input-provider.json; do
+            grep -q '"binary_path":  "/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/DisplayXR-OpenTracking.dylib"' \
+              "$D/DisplayProcessors/$m"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -150,7 +153,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" "$PKG" --title "DisplayXR Open Tracking $GITHUB_REF_NAME" \
-            --notes "macOS (Apple silicon) installer for the open camera tracking provider: head and eye tracking from the built-in camera. Requires DisplayXR runtime ${MIN_RUNTIME} or later. Installs into /Library/Application Support/DisplayXR; remove with \`sudo \"/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/uninstall.sh\"\`. Models: MediaPipe Face Landmarker (Apache-2.0); ONNX Runtime (MIT); see licenses/."
+            --notes "macOS (Apple silicon) installer for the open camera tracking provider: head and eye tracking, and hand tracking, from the built-in camera. Requires DisplayXR runtime ${MIN_RUNTIME} or later. Installs into /Library/Application Support/DisplayXR; remove with \`sudo \"/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/uninstall.sh\"\`. Models: MediaPipe Face Landmarker and Hand Landmarker (Apache-2.0); ONNX Runtime (MIT); see licenses/."
 
       - name: Tear down the keychain
         if: always()

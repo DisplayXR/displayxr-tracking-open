@@ -7,12 +7,15 @@
 #   scripts/package_macos.sh <install-tree> <version> <out.pkg> [--min-runtime X.Y.Z]
 #
 # <install-tree> is `cmake --install build --prefix <dir>` of a Release build configured with
-# -DOPENTRACK_INSTALL_MODELS_DIR=<models>: the provider, ONNX Runtime, the pack, the two ONNX
-# blobs and licenses/. The .pkg installs where an INSTALLED runtime finds it with no environment:
+# -DOPENTRACK_INSTALL_MODELS_DIR=<models>: the provider, ONNX Runtime, the pack, the four ONNX
+# blobs (face + hands) and licenses/. The .pkg installs where an INSTALLED runtime finds it with no
+# environment:
 #
 #   /Library/Application Support/DisplayXR/DisplayProcessors/100-open-tracking-tracking-provider.json
-#       the manifest, in the runtime's system discovery root (the -tracking-provider suffix
-#       routes it to the tracking class; the display-processor loader never reads it)
+#   /Library/Application Support/DisplayXR/DisplayProcessors/100-open-tracking-hands-input-provider.json
+#       the two roles' manifests (one binary), in the runtime's system discovery root (the
+#       -tracking-provider / -input-provider suffix routes each to its class; the
+#       display-processor loader never reads them)
 #   /Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/
 #       the provider and everything it loads beside itself (ONNX Runtime, pack, models)
 #
@@ -47,7 +50,8 @@ DEST="$ROOT/$PLUGIN_DIR"
 mkdir -p "$DEST" "$ROOT/DisplayProcessors"
 
 # Everything the provider resolves next to itself (ot_module_dir), then the licences.
-for f in DisplayXR-OpenTracking.dylib open-tracking-default.models.json face_detector.onnx face_landmarks.onnx; do
+for f in DisplayXR-OpenTracking.dylib open-tracking-default.models.json face_detector.onnx face_landmarks.onnx \
+	hand_detector.onnx hand_landmarks.onnx; do
 	[ -f "$TREE/$f" ] || { echo "missing from the install tree: $f" >&2; exit 1; }
 	cp "$TREE/$f" "$DEST/"
 done
@@ -57,11 +61,12 @@ cp -R "$TREE/licenses" "$DEST/licenses"
 # The models must be the pack's bit-identical blobs.
 python3 -I "$HERE/scripts/check_pack.py" "$HERE/packs/open-tracking-default.models.json" --verify-dir "$DEST"
 
-sed -e "s|@OPENTRACK_BINARY@|$PREFIX/$PLUGIN_DIR/DisplayXR-OpenTracking.dylib|" \
-    -e "s|\"version\":      \"[^\"]*\"|\"version\":      \"$VERSION\"|" \
-    "$HERE/examples/manifest/100-open-tracking-tracking-provider.json.in" \
-    > "$ROOT/DisplayProcessors/100-open-tracking-tracking-provider.json"
-python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$ROOT/DisplayProcessors/100-open-tracking-tracking-provider.json"
+for m in 100-open-tracking-tracking-provider.json 100-open-tracking-hands-input-provider.json; do
+	sed -e "s|@OPENTRACK_BINARY@|$PREFIX/$PLUGIN_DIR/DisplayXR-OpenTracking.dylib|" \
+	    -e "s|\"version\":      \"[^\"]*\"|\"version\":      \"$VERSION\"|" \
+	    "$HERE/examples/manifest/$m.in" > "$ROOT/DisplayProcessors/$m"
+	python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$ROOT/DisplayProcessors/$m"
+done
 
 cp "$HERE/scripts/macos/uninstall-open-tracking.sh" "$DEST/uninstall.sh"
 chmod 0755 "$DEST/uninstall.sh"

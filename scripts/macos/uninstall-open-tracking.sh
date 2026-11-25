@@ -6,7 +6,8 @@
 # left alone. Run with sudo.
 set -e
 PREFIX="/Library/Application Support/DisplayXR"
-rm -f "$PREFIX/DisplayProcessors/100-open-tracking-tracking-provider.json"
+rm -f "$PREFIX/DisplayProcessors/100-open-tracking-tracking-provider.json" \
+	"$PREFIX/DisplayProcessors/100-open-tracking-hands-input-provider.json"
 rm -rf "$PREFIX/lib/displayxr/plugins/open-tracking"
 pkgutil --forget com.displayxr.tracking.open >/dev/null 2>&1 || true
 # A running service keeps the provider it found at start: restart it so it lets go.
