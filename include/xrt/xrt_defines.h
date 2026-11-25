@@ -731,6 +731,7 @@ enum xrt_device_name
 	// added in OpenXR 1.1
 
 
+
 };
 
 /*!
@@ -753,6 +754,17 @@ enum xrt_device_type
 	XRT_DEVICE_TYPE_BODY_TRACKER,
 	//! Holds the rig (navigation) role, ADR-034 Amendment 4.
 	XRT_DEVICE_TYPE_NAVIGATION,
+	/*!
+	 * A single hand-held tool (a stylus) that belongs on the user's DOMINANT
+	 * hand. An input provider declares it instead of LEFT / RIGHT when it does
+	 * not know the user's handedness; the input-provider builder resolves it in
+	 * place to @ref XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER or
+	 * @ref XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER from the handedness policy
+	 * before any role is read (ADR-034 Amendment 8). Unlike
+	 * @ref XRT_DEVICE_TYPE_ANY_HAND_CONTROLLER it never means "left first".
+	 * Nothing past the builder ever sees this value.
+	 */
+	XRT_DEVICE_TYPE_DOMINANT_HAND_CONTROLLER,
 };
 
 /*!

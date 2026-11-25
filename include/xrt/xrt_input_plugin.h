@@ -37,8 +37,11 @@
 
 #include "xrt/xrt_camera_pose.h"
 #include "xrt/xrt_component_settings.h"
+#include "xrt/xrt_component_license.h"
 #include "xrt/xrt_results.h"
+#include "xrt/xrt_stereo_camera.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -269,6 +272,74 @@ struct xrt_input_pointer_event
 };
 
 /*!
+ * Opaque handle of one shared-camera stream opened through
+ * @ref xrt_input_plugin_host_iface::open_shared_camera. Host-owned; valid
+ * until @ref xrt_input_plugin_host_iface::close_shared_camera.
+ */
+struct xrt_input_host_camera;
+
+/*!
+ * What a provider asks for in @ref xrt_input_plugin_host_iface::open_shared_camera
+ * (the "in" fields) and what the host hands back (the "out" fields).
+ *
+ * The out fields are the values a `CAMERA_CONSUMER` client of the service
+ * gets over IPC (XR_DXR_stereo_camera, ADR-043): the camera's properties, its
+ * RECTIFIED calibration, the stream's shared-memory ring layout and the
+ * stream's wake handle — so a provider written against this slot is one
+ * `#ifdef` away from the IPC form.
+ *
+ * `struct_size` first (ADR-020): the caller sets it to its own `sizeof`; the
+ * host reads and writes only the fields that size covers.
+ *
+ * @ingroup xrt_iface
+ */
+struct xrt_input_host_camera_open
+{
+	uint32_t struct_size; //!< in: `sizeof(struct xrt_input_host_camera_open)` at the provider's compile time
+	//! in: enum xrt_stereo_camera_output. RECTIFIED only — RAW is refused
+	//! (`XRT_ERROR_NOT_AUTHORIZED`), as it is for a present-owner client.
+	uint32_t output;
+	//! in: xrt_stereo_camera_properties::camera_id, or 0 = the active display's own camera.
+	uint64_t camera_id;
+	//! in: delivery cap in Hz; 0 = the source's rate.
+	float max_frame_rate;
+	uint32_t reserved; //!< in: must be 0
+
+	struct xrt_stereo_camera_properties props;     //!< out: the opened camera
+	struct xrt_stereo_camera_calibration calib;    //!< out: RECTIFIED calibration (zeroed when none)
+	struct xrt_stereo_camera_stream_layout layout; //!< out: the stream's ring (GRAY8 side-by-side)
+	//! out: signalled after every published frame. HOST-owned: valid until
+	//! close, never closed or signalled by the provider (Windows: an
+	//! auto-reset event; POSIX: the read end of a non-blocking pipe).
+	xrt_graphics_sync_handle_t wake;
+};
+
+/*!
+ * One frame acquired through @ref xrt_input_plugin_host_iface::camera_acquire.
+ * The planes point into the host's ring and stay byte-stable until
+ * @ref xrt_input_plugin_host_iface::camera_release of this frame or the next
+ * acquire, whichever comes first. Side by side: plane 0 is the full SBS image
+ * (left eye = left half); plane 1 is the second plane of a two-plane format
+ * (NULL for GRAY8).
+ *
+ * @ingroup xrt_iface
+ */
+struct xrt_input_host_camera_frame
+{
+	uint32_t struct_size;  //!< `sizeof(struct xrt_input_host_camera_frame)` at the provider's compile time
+	bool time_is_exposure; //!< @ref timestamp_ns is the exposure time (else the delivery time)
+	uint64_t frame_index;  //!< the source's sequence number (> 0)
+	int64_t timestamp_ns;  //!< os_monotonic clock
+	uint32_t width;        //!< full side-by-side width
+	uint32_t height;
+	uint32_t format; //!< enum xrt_stereo_camera_format (GRAY8)
+	//! Moves when the camera's calibration changes: re-read it (close + reopen).
+	uint32_t calibration_generation;
+	const uint8_t *plane[2];
+	uint32_t row_pitch[2];
+};
+
+/*!
  * Host-supplied callbacks the provider may call. Intentionally minimal in
  * v1 — logging, debug-var tracking, and metrics reach providers through
  * the runtime's aux export surface, same boundary discipline as
@@ -377,11 +448,126 @@ struct xrt_input_plugin_host_iface
 	xrt_camera_get_pose_fn_t get_camera_pose;
 
 	/*!
+	 * Open the display's SHARED stereo camera as a hands source (ADR-043;
+	 * tracking-provider-discovery.md §7 / §10 item 2): an in-process consumer
+	 * of the service's camera manager, which stays the camera's single owner
+	 * — the same RECTIFIED GRAY8 shared-memory stream a `CAMERA_CONSUMER`
+	 * client gets over IPC, without a connection.
+	 *
+	 * @p provider_id is the provider's own `iface->id` (the id it passes to
+	 * @ref get_setting): the host shares ONE iface between all providers, so
+	 * the id is how it knows who is asking — the name the camera indicator
+	 * shows and the binary provenance (ADR-054 N4b) the consent policy reads.
+	 * A signed / allowlisted / platform-trusted provider is allowed without a
+	 * prompt; any other is prompted like an app. The kill switch, the sharing
+	 * toggle, the session lock and the in-use indicator apply exactly as they
+	 * do to an app.
+	 *
+	 * Call it ON DEMAND (from `create_devices` or later, never `probe`), not
+	 * per frame, and from a thread that may block: an unverified provider's
+	 * open may wait for the user's answer. Returns
+	 * `XRT_ERROR_FEATURE_NOT_SUPPORTED` when this process has no camera
+	 * manager (the in-process runtime, or the service still starting — retry
+	 * later) or no rectifiable camera, `XRT_ERROR_STEREO_CAMERA_DISABLED`
+	 * when sharing is off, `XRT_ERROR_STEREO_CAMERA_CONSENT_REFUSED`,
+	 * `XRT_ERROR_NOT_AUTHORIZED` (RAW asked, an unknown @p provider_id),
+	 * `XRT_ERROR_CLIENT_LIMIT_REACHED` (the camera-consumer quota),
+	 * `XRT_ERROR_STEREO_CAMERA_BUSY`.
+	 *
+	 * Carved out of the former reserved[4], like the slots above: size and
+	 * every other offset unchanged, the API major stays 1. An older runtime
+	 * leaves it (and the three slots below) NULL — providers MUST NULL-check
+	 * (and cover-check `struct_size`). Announced by
+	 * @ref XRT_INPUT_PLUGIN_HOST_HAS_SHARED_CAMERA.
+	 */
+	xrt_result_t (*open_shared_camera)(const char *provider_id,
+	                                   struct xrt_input_host_camera_open *inout,
+	                                   struct xrt_input_host_camera **out_cam);
+
+	/*!
+	 * The newest frame of @p cam, waiting up to @p timeout_ms for one newer
+	 * than the last acquire (0 = poll). Returns `XRT_SUCCESS` with @p out
+	 * filled, `XRT_TIMEOUT` when no new frame came, or
+	 * `XRT_ERROR_STEREO_CAMERA_STREAM_ENDED` when the service ended the
+	 * stream (the user stopped sharing, the source went away, shutdown):
+	 * close it, and open again later if still wanted.
+	 *
+	 * @p out_state (may be NULL) always receives the camera's state as an app
+	 * would be told it (enum xrt_stereo_camera_state): AVAILABLE = frames
+	 * flow; WAITING = the display delivers frames only while a 3D session
+	 * holds its tracker and none does — a provider reports
+	 * XRT_INPUT_PROVIDER_PRESENCE_ABSENT then, PRESENT once frames flow
+	 * again; SUSPENDED = session locked / sharing off / frames stopped;
+	 * UNAVAILABLE = gone. Carved out of the former reserved[5].
+	 */
+	xrt_result_t (*camera_acquire)(struct xrt_input_host_camera *cam,
+	                               uint32_t timeout_ms,
+	                               struct xrt_input_host_camera_frame *out,
+	                               uint32_t *out_state);
+
+	/*!
+	 * Done with frame @p frame_index: its slot may be rewritten. Optional (the
+	 * next acquire releases it too), but a provider that holds a frame for
+	 * long should release it. Carved out of the former reserved[6].
+	 */
+	void (*camera_release)(struct xrt_input_host_camera *cam, uint64_t frame_index);
+
+	/*!
+	 * Stop and free the stream; @p cam and every pointer it handed out are
+	 * invalid afterwards. NULL is ignored. Carved out of the former
+	 * reserved[7].
+	 */
+	void (*close_shared_camera)(struct xrt_input_host_camera *cam);
+
+	/*!
+	 * The user's handedness, as @ref xrt_input_handedness (ADR-034
+	 * Amendment 8): the hand a single tool such as a stylus belongs on.
+	 * Class policy, resolved by the runtime — Windows
+	 * `InputProviders\Policy\Handedness` (DWORD, 0 = right, 1 = left; HKCU
+	 * over HKLM under `Policy\Lock`), POSIX a `handedness` file in the
+	 * per-user manifest dir (first byte `l` / `L` = left), absent = right.
+	 * It is what the builder resolves an
+	 * `XRT_DEVICE_TYPE_DOMINANT_HAND_CONTROLLER` with, so a provider rarely
+	 * needs to call it; a non-NULL slot is also how a provider knows the
+	 * runtime resolves DOMINANT at all. Non-blocking; read at init.
+	 *
+	 * Carved out of the former reserved[8], like the slots above: size and
+	 * every other offset unchanged, the API major stays 1. An older runtime
+	 * leaves it NULL — providers MUST NULL-check (and cover-check
+	 * `struct_size`). Announced by @ref XRT_INPUT_PLUGIN_HOST_HAS_GET_HANDEDNESS.
+	 */
+	uint32_t (*get_handedness)(void);
+
+	/*!
 	 * Reserved space for forward-compatible host-supplied callbacks.
 	 * Providers MUST NOT dereference any reserved slot.
 	 */
-	void *reserved[10];
+	void *reserved[5];
 };
+
+/*!
+ * Values of @ref xrt_input_plugin_host_iface::get_handedness. Fixed values
+ * (ABI): never renumber.
+ */
+enum xrt_input_handedness
+{
+	XRT_INPUT_HANDEDNESS_RIGHT = 0,
+	XRT_INPUT_HANDEDNESS_LEFT = 1,
+};
+
+/*!
+ * Defined when this header carries
+ * @ref xrt_input_plugin_host_iface::get_handedness and the runtime resolves
+ * `XRT_DEVICE_TYPE_DOMINANT_HAND_CONTROLLER` (ADR-034 Amendment 8).
+ */
+#define XRT_INPUT_PLUGIN_HOST_HAS_GET_HANDEDNESS 1
+
+/*!
+ * Defined when this runtime header set carries the stylus pieces of ADR-034
+ * (`xrt_defines.h`), `XRT_DEVICE_TYPE_DOMINANT_HAND_CONTROLLER`, and
+ * `XRT_TRACKING_TYPE_RIG_LOCAL_PHYSICAL` (`xrt_tracking.h`).
+ */
+#define XRT_INPUT_PLUGIN_HAS_STYLUS 1
 
 /*!
  * Defined when this header carries the
@@ -406,9 +592,18 @@ struct xrt_input_plugin_host_iface
  */
 #define XRT_INPUT_PLUGIN_HOST_HAS_GET_CAMERA_POSE 1
 
-// The get_display_geometry, get_setting, poll_pointer_events and get_camera_pose
-// slots were carved out of the former reserved[0] / [1] / [2] / [3]: the host
-// iface's size and every other offset are unchanged, so providers built
+/*!
+ * Defined when this header carries the shared-camera slots
+ * (@ref xrt_input_plugin_host_iface::open_shared_camera, `camera_acquire`,
+ * `camera_release`, `close_shared_camera`), so a provider that must also
+ * compile against an older runtime header can `#ifdef`-guard their use.
+ */
+#define XRT_INPUT_PLUGIN_HOST_HAS_SHARED_CAMERA 1
+
+// The get_display_geometry, get_setting, poll_pointer_events, get_camera_pose,
+// open_shared_camera, camera_acquire, camera_release, close_shared_camera and
+// get_handedness slots were carved out of the former reserved[0] .. [8], in that order: the
+// host iface's size and every other offset are unchanged, so providers built
 // against the previous header keep working and the API major stays 1.
 // clang-format off
 XRT_INPUT_PLUGIN_ABI_ASSERT(offsetof(struct xrt_input_plugin_host_iface, get_setting) ==
@@ -423,9 +618,29 @@ XRT_INPUT_PLUGIN_ABI_ASSERT(offsetof(struct xrt_input_plugin_host_iface, get_cam
                                 offsetof(struct xrt_input_plugin_host_iface, get_display_geometry) +
                                     3 * sizeof(void *),
                             "xrt_input_plugin_host_iface: get_camera_pose must occupy the former reserved[3]");
-XRT_INPUT_PLUGIN_ABI_ASSERT(offsetof(struct xrt_input_plugin_host_iface, reserved) ==
+XRT_INPUT_PLUGIN_ABI_ASSERT(offsetof(struct xrt_input_plugin_host_iface, open_shared_camera) ==
                                 offsetof(struct xrt_input_plugin_host_iface, get_display_geometry) +
                                     4 * sizeof(void *),
+                            "xrt_input_plugin_host_iface: open_shared_camera must occupy the former reserved[4]");
+XRT_INPUT_PLUGIN_ABI_ASSERT(offsetof(struct xrt_input_plugin_host_iface, camera_acquire) ==
+                                offsetof(struct xrt_input_plugin_host_iface, get_display_geometry) +
+                                    5 * sizeof(void *),
+                            "xrt_input_plugin_host_iface: camera_acquire must occupy the former reserved[5]");
+XRT_INPUT_PLUGIN_ABI_ASSERT(offsetof(struct xrt_input_plugin_host_iface, camera_release) ==
+                                offsetof(struct xrt_input_plugin_host_iface, get_display_geometry) +
+                                    6 * sizeof(void *),
+                            "xrt_input_plugin_host_iface: camera_release must occupy the former reserved[6]");
+XRT_INPUT_PLUGIN_ABI_ASSERT(offsetof(struct xrt_input_plugin_host_iface, close_shared_camera) ==
+                                offsetof(struct xrt_input_plugin_host_iface, get_display_geometry) +
+                                    7 * sizeof(void *),
+                            "xrt_input_plugin_host_iface: close_shared_camera must occupy the former reserved[7]");
+XRT_INPUT_PLUGIN_ABI_ASSERT(offsetof(struct xrt_input_plugin_host_iface, get_handedness) ==
+                                offsetof(struct xrt_input_plugin_host_iface, get_display_geometry) +
+                                    8 * sizeof(void *),
+                            "xrt_input_plugin_host_iface: get_handedness must occupy the former reserved[8]");
+XRT_INPUT_PLUGIN_ABI_ASSERT(offsetof(struct xrt_input_plugin_host_iface, reserved) ==
+                                offsetof(struct xrt_input_plugin_host_iface, get_display_geometry) +
+                                    9 * sizeof(void *),
                             "xrt_input_plugin_host_iface: get_display_geometry must occupy the former reserved[0]");
 XRT_INPUT_PLUGIN_ABI_ASSERT(sizeof(struct xrt_input_plugin_host_iface) ==
                                 2 * sizeof(uint32_t) + 14 * sizeof(void *),
@@ -511,9 +726,24 @@ struct xrt_input_plugin_iface
 	 *
 	 * Each returned device is an ordinary @ref xrt_device that
 	 * self-describes: `device_type`
-	 * (`XRT_DEVICE_TYPE_{LEFT,RIGHT,ANY}_HAND_CONTROLLER`, …) plus the
-	 * interaction profile it binds via `name` / `binding_profiles`
-	 * (an existing profile from `bindings.json`). The device must
+	 * (`XRT_DEVICE_TYPE_{LEFT,RIGHT,ANY,DOMINANT}_HAND_CONTROLLER`, …) plus
+	 * the interaction profile it binds via `name` / `binding_profiles`
+	 * (an existing profile from `bindings.json`).
+	 *
+	 * A single hand-held tool — a stylus — should declare
+	 * `XRT_DEVICE_TYPE_DOMINANT_HAND_CONTROLLER` (ADR-034 Amendment 8): the
+	 * builder resolves it in place to RIGHT or LEFT from the user's
+	 * handedness policy (@ref xrt_input_plugin_host_iface::get_handedness)
+	 * before any role is read. `ANY_HAND_CONTROLLER` always lands on the
+	 * LEFT hand first and is meant for a pair whose sides are
+	 * interchangeable, never for one pen. A provider that must also run on
+	 * a runtime without @ref XRT_INPUT_PLUGIN_HOST_HAS_GET_HANDEDNESS
+	 * (where DOMINANT claims no role) declares LEFT / RIGHT itself, e.g.
+	 * from its own `HAND` setting through `get_setting`.
+	 *
+	 * publishes its poses on an `XRT_TRACKING_TYPE_RIG_LOCAL_PHYSICAL`
+	 * origin, so a tip touching the panel lands where the app renders that
+	 * point of the glass (input-provider-discovery.md §4b.4a). The device must
 	 * implement `update_inputs`, `get_tracked_pose` (timestamp-correct
 	 * prediction — push samples into `m_relation_history` and predict
 	 * on demand for asynchronously-fed hardware), `set_output`
@@ -573,6 +803,33 @@ struct xrt_input_plugin_iface
 	 * @ref XRT_INPUT_PLUGIN_IFACE_HAS_DESCRIBE_SETTINGS.
 	 */
 	xrt_component_describe_settings_fn_t describe_settings;
+
+	/*!
+	 * The provider's LICENCE STATE (ADR-054 N5, ADR-064 §5; the one contract
+	 * every class shares, `xrt/xrt_component_license.h`). Answers from
+	 * memory, no instance, any thread. The loader acts on the answer it gets
+	 * after a successful `probe()`: a provider whose state is `unlicensed`
+	 * or `expired` is destroyed and not loaded, exactly like one that
+	 * declined, so the roles go to the next provider; a resident provider
+	 * whose state turns blocking later stops being a candidate at the next
+	 * policy re-read. Optional: NULL (or a provider whose `struct_size`
+	 * predates this slot) has no licence to report (`not_applicable`) and
+	 * nothing changes. Appended under `struct_size` cover (API major stays
+	 * 1); guarded with @ref XRT_INPUT_PLUGIN_IFACE_HAS. Announced by
+	 * @ref XRT_INPUT_PLUGIN_IFACE_HAS_GET_LICENSE_STATE.
+	 */
+	xrt_component_get_license_state_fn_t get_license_state;
+
+	/*!
+	 * Hand the provider an ACTIVATION TOKEN (a pasted key, or a vendor
+	 * checkout's deep-link token): an opaque UTF-8 blob the runtime never
+	 * interprets, logs or stores. Returns the new licence state or an error
+	 * line (`xrt/xrt_component_license.h`). May block for a few seconds.
+	 * Optional; appended under `struct_size` cover (API major stays 1);
+	 * guarded with @ref XRT_INPUT_PLUGIN_IFACE_HAS. Announced by
+	 * @ref XRT_INPUT_PLUGIN_IFACE_HAS_ACTIVATE.
+	 */
+	xrt_component_activate_fn_t activate;
 };
 
 /*!
@@ -581,6 +838,33 @@ struct xrt_input_plugin_iface
  * filling it.
  */
 #define XRT_INPUT_PLUGIN_IFACE_HAS_DESCRIBE_SETTINGS 1
+
+/*!
+ * Defined when @ref xrt_input_plugin_iface carries `get_license_state`
+ * (ADR-054 N5), so a provider built against an older runtime header can
+ * #ifdef-guard filling it.
+ */
+#define XRT_INPUT_PLUGIN_IFACE_HAS_GET_LICENSE_STATE 1
+
+/*!
+ * Defined when @ref xrt_input_plugin_iface carries `activate` (ADR-054 N5),
+ * so a provider built against an older runtime header can #ifdef-guard
+ * filling it.
+ */
+#define XRT_INPUT_PLUGIN_IFACE_HAS_ACTIVATE 1
+
+/*!
+ * The licence state of @p iface, with the absent-slot rule applied
+ * (`not_applicable` unless the provider says otherwise). @p out is always a
+ * valid, sanitised struct. Returns the state.
+ */
+static inline uint32_t
+xrt_input_plugin_iface_license_state(const struct xrt_input_plugin_iface *iface,
+                                     struct xrt_component_license_state *out)
+{
+	return xrt_component_license_query(
+	    XRT_INPUT_PLUGIN_IFACE_HAS(iface, get_license_state) ? iface->get_license_state : NULL, out);
+}
 
 
 /*
