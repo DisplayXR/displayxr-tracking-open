@@ -995,10 +995,12 @@ log_frame(const struct oth_source *src,
 	for (int s = 0; s < 2 && n < sizeof(buf); s++) {
 		if (out[s].active) {
 			n += (size_t)snprintf(
-			    buf + n, sizeof(buf) - n, " | %s: palm (%.3f, %.3f, %.3f) m, %.0f mm from the camera",
+			    buf + n, sizeof(buf) - n,
+			    " | %s: palm (%.3f, %.3f, %.3f) m, %.0f mm from the camera, pinch %.0f mm%s",
 			    s == OT_SIDE_LEFT ? "left" : "right", (double)out[s].joints.pos[OT_HJ_PALM][0],
 			    (double)out[s].joints.pos[OT_HJ_PALM][1], (double)out[s].joints.pos[OT_HJ_PALM][2],
-			    (double)out[s].depth_m * 1000.0);
+			    (double)out[s].depth_m * 1000.0, (double)out[s].pinch_m * 1000.0,
+			    out[s].pinching ? " PINCHING" : "");
 		}
 	}
 	if (n < sizeof(buf)) {
