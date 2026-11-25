@@ -333,11 +333,16 @@ mean_luma(const struct ot_image *im)
 {
 	double sum = 0;
 	uint32_t n = 0;
-	const uint32_t bpp = im->format == OT_FMT_BGRA ? 4u : 3u;
+	const uint32_t bpp = ot_pixel_bytes(im->format);
 	for (uint32_t y = 0; y < im->height; y += 16) {
 		const uint8_t *row = im->data + (size_t)y * im->stride;
 		for (uint32_t x = 0; x < im->width; x += 16) {
 			const uint8_t *p = row + (size_t)x * bpp;
+			if (im->format == OT_FMT_GRAY8) {
+				sum += p[0];
+				n++;
+				continue;
+			}
 			const double r = im->format == OT_FMT_BGRA ? p[2] : p[0], b = im->format == OT_FMT_BGRA ? p[0] : p[2];
 			sum += 0.299 * r + 0.587 * p[1] + 0.114 * b;
 			n++;

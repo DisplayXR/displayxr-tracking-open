@@ -30,6 +30,15 @@ struct fh_record
 	int64_t push_ns; //!< when the sink received it (monotonic)
 };
 
+//! The host's shared stereo camera (input host iface §4d), for the hands role.
+enum fh_shared_mode
+{
+	FH_SHARED_NONE = 0,    //!< an older runtime: the four slots are NULL
+	FH_SHARED_UNSUPPORTED, //!< the slots exist; open says no camera here (an in-process runtime)
+	FH_SHARED_OK,          //!< a rectified GRAY8 side-by-side stream made from shared_image
+	FH_SHARED_WAITING,     //!< it opens, but no frame ever comes (WAITING: no 3D session holds the tracker)
+};
+
 struct fh_config
 {
 	float panel_w_m, panel_h_m;  //!< the "display" (default 0.302 x 0.196 m, a 14-inch laptop panel)
@@ -37,7 +46,16 @@ struct fh_config
 	float iris_scale;            //!< the host's per-user viewer iris scale (default 1)
 	bool no_pose_slot;           //!< act like an older runtime: get_camera_pose = NULL
 	const char *env_prefix;      //!< also read settings from <prefix><KEY> in the environment (NULL: no)
+	enum fh_shared_mode shared;  //!< default FH_SHARED_NONE
+	const char *shared_image;    //!< FH_SHARED_OK: a binary PPM; its grey is the LEFT eye
+	float shared_disparity_px;   //!< the right eye = the left shifted by this (a plane at f * B / d)
+	float shared_baseline_mm;    //!< default 60
+	float shared_hfov_deg;       //!< the rectified focal length from this (default 65)
 };
+
+//! How many times the provider opened the shared camera.
+uint32_t
+fh_shared_opens(void);
 
 void
 fh_config_defaults(struct fh_config *c);

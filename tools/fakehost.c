@@ -13,8 +13,8 @@
  *   decline-disabled ENABLE=0 -> probe declines
  *   decline-models   MODEL_DIR without the models -> probe declines
  *   decline-camera   a DEVICE that matches nothing -> probe declines
- *   blank            (models; --make-blank writes the frame) a frame with no face: running, nothing pushed, clean stop, restart
- *   face             (models) a face photo: tracked samples, plausible eyes, the camera block, clean stop
+ *   blank            (models; --make-blank writes the frame) a frame with no face: running, nothing pushed, clean stop,
+ * restart face             (models) a face photo: tracked samples, plausible eyes, the camera block, clean stop
  *
  * The hands role (input provider, the same binary): negotiate, probe, create_devices, then joint locates
  * through the devices' get_hand_tracking, as the runtime's state tracker makes them.
@@ -23,6 +23,13 @@
  *   hands-decline-models   MODEL_DIR without the models -> probe declines
  *   hands-blank            (models) no hand: two hand-tracker devices on a RIG_LOCAL origin, PRESENT, never active
  *   hands                  (models) a hand photo (--expect left|right): that hand only, plausible joints
+ *   hands-shared-waiting   the shared camera opens but no frame comes: no hand, presence ABSENT
+ *
+ * The host's shared stereo camera (input host iface §4d): --shared ok|unsupported|waiting offers the four slots
+ * (default: NULL, an older runtime). ok streams --shared-image as a rectified GRAY8 pair whose right eye is the
+ * left shifted by --disparity px (--baseline mm, --shared-hfov deg), i.e. a plane at f * B / d.
+ * --expect-depth M checks the palm's distance in front of the display; --expect-shared that the hand came
+ * through the shared camera (it was opened).
  *
  * Exit: 0 pass, 1 a check failed, 2 usage / load error, 77 skipped (models or test image absent).
  */
@@ -41,6 +48,8 @@
 #define SKIP 77
 
 static int g_fail = 0;
+static float g_expect_depth = 0.0f; //!< > 0: the palm's z must be within 8 % of it
+static bool g_expect_shared = false;
 
 static void
 check(bool ok, const char *fmt, ...)
@@ -261,8 +270,8 @@ run_hands(struct xrt_input_plugin_iface *it, struct xrt_input_plugin_instance *i
 		const int found = locate_until_active(dev, 60000, js, &at);
 		check(found == want, "the %s hand is active (found %s)", expect,
 		      found == 0 ? "left" : found == 1 ? "right" : "none");
-		// Let the filter settle on the still image, then locate again.
-		fh_sleep_ms(400);
+		// Let the filter settle on the still image (and the pair's hand-size factor, ~1 s), then locate again.
+		fh_sleep_ms(g_expect_depth > 0.0f ? 3000 : 400);
 		(void)locate_until_active(dev, 1000, js, &at);
 		check(!js[1 - want].is_active, "the other hand is not");
 		if (found == want) {
@@ -311,8 +320,40 @@ run_hands(struct xrt_input_plugin_iface *it, struct xrt_input_plugin_instance *i
 			quat_rotate(&joint(s, XRT_HAND_JOINT_PALM)->relation.pose.orientation, py, up);
 			check(up[2] > 0.5f, "+Y out of the back of the hand: toward the user (%.2f)", up[2]);
 			check(dist(thumb, index) > 0.035f, "an open hand: no pinch distance (%.0f mm)", dist(thumb, index) * 1000.0f);
+			if (g_expect_depth > 0.0f) {
+				check(fabsf(palm->z - g_expect_depth) < 0.08f * g_expect_depth,
+				      "the palm at the depth the pair says: z %.3f m, expected %.3f m", palm->z,
+				      g_expect_depth);
+			}
 		}
 	}
+	if (g_expect_shared) {
+		check(fh_shared_opens() > 0, "the hands came through the shared camera (%u opens)", fh_shared_opens());
+	}
+	for (int side = 0; side < 2; side++) {
+		dev[side]->destroy(dev[side]);
+	}
+	return 0;
+}
+
+//! The shared camera opens but stays WAITING: no hand, and the provider says ABSENT (spec §4d.2).
+static int
+run_hands_waiting(struct xrt_input_plugin_iface *it, struct xrt_input_plugin_instance *inst)
+{
+	struct xrt_device *dev[XRT_INPUT_PLUGIN_MAX_DEVICES] = {0};
+	uint32_t n = 0;
+	check(it->create_devices(inst, dev, XRT_INPUT_PLUGIN_MAX_DEVICES, &n) == XRT_SUCCESS && n == 2,
+	      "create_devices: two devices (%u)", n);
+	if (n != 2) {
+		return 0;
+	}
+	check(it->get_presence(inst) == XRT_INPUT_PROVIDER_PRESENCE_PRESENT, "PRESENT before the camera is tried");
+	struct xrt_hand_joint_set js[2];
+	int64_t at = 0;
+	const int found = locate_until_active(dev, 4000, js, &at); // demand: the thread opens the camera
+	check(found < 0, "no hand without frames");
+	check(fh_shared_opens() > 0, "the shared camera was opened (%u)", fh_shared_opens());
+	check(it->get_presence(inst) == XRT_INPUT_PROVIDER_PRESENCE_ABSENT, "ABSENT while the stream waits");
 	for (int side = 0; side < 2; side++) {
 		dev[side]->destroy(dev[side]);
 	}
@@ -357,8 +398,8 @@ run_hands_mode(const char *provider, const char *mode, const struct fh_config *c
 		it->destroy(inst);
 		return g_fail ? 1 : 0;
 	}
-	if (models == NULL || image == NULL) {
-		printf("[SKIP] %s needs --models and --image\n", mode);
+	if (models == NULL || (image == NULL && cfg->shared == FH_SHARED_NONE)) {
+		printf("[SKIP] %s needs --models and --image (or --shared)\n", mode);
 		return SKIP;
 	}
 	if (pr != XRT_SUCCESS) {
@@ -366,6 +407,11 @@ run_hands_mode(const char *provider, const char *mode, const struct fh_config *c
 		return SKIP;
 	}
 	check(true, "probe: usable");
+	if (strcmp(mode, "hands-shared-waiting") == 0) {
+		run_hands_waiting(it, inst);
+		it->destroy(inst);
+		return g_fail ? 1 : 0;
+	}
 	run_hands(it, inst, strcmp(mode, "hands") == 0 ? (expect != NULL ? expect : "left") : NULL);
 	it->destroy(inst); // joins the provider's thread
 	check(true, "destroy returned (thread joined)");
@@ -380,8 +426,10 @@ main(int argc, char **argv)
 		return 2;
 	}
 	const char *provider = argv[1], *mode = argv[2];
-	const char *models = NULL, *image = NULL, *expect = NULL;
+	const char *models = NULL, *image = NULL, *expect = NULL, *shared_image = NULL;
 	bool make_blank = false;
+	enum fh_shared_mode shared = FH_SHARED_NONE;
+	float disparity = 0.0f, baseline = 0.0f, shared_hfov = 0.0f;
 	for (int i = 3; i < argc; i++) {
 		if (strcmp(argv[i], "--set") == 0 && i + 1 < argc) {
 			if (!fh_set(argv[++i])) {
@@ -395,6 +443,24 @@ main(int argc, char **argv)
 			image = argv[++i];
 		} else if (strcmp(argv[i], "--expect") == 0 && i + 1 < argc) {
 			expect = argv[++i];
+		} else if (strcmp(argv[i], "--shared") == 0 && i + 1 < argc) {
+			const char *m = argv[++i];
+			shared = strcmp(m, "ok") == 0            ? FH_SHARED_OK
+			         : strcmp(m, "unsupported") == 0 ? FH_SHARED_UNSUPPORTED
+			         : strcmp(m, "waiting") == 0     ? FH_SHARED_WAITING
+			                                         : FH_SHARED_NONE;
+		} else if (strcmp(argv[i], "--shared-image") == 0 && i + 1 < argc) {
+			shared_image = argv[++i];
+		} else if (strcmp(argv[i], "--disparity") == 0 && i + 1 < argc) {
+			disparity = strtof(argv[++i], NULL);
+		} else if (strcmp(argv[i], "--baseline") == 0 && i + 1 < argc) {
+			baseline = strtof(argv[++i], NULL);
+		} else if (strcmp(argv[i], "--shared-hfov") == 0 && i + 1 < argc) {
+			shared_hfov = strtof(argv[++i], NULL);
+		} else if (strcmp(argv[i], "--expect-depth") == 0 && i + 1 < argc) {
+			g_expect_depth = strtof(argv[++i], NULL);
+		} else if (strcmp(argv[i], "--expect-shared") == 0) {
+			g_expect_shared = true;
 		} else {
 			fprintf(stderr, "unknown argument %s\n", argv[i]);
 			return 2;
@@ -402,6 +468,11 @@ main(int argc, char **argv)
 	}
 	struct fh_config cfg;
 	fh_config_defaults(&cfg);
+	cfg.shared = shared;
+	cfg.shared_image = shared_image;
+	cfg.shared_disparity_px = disparity;
+	cfg.shared_baseline_mm = baseline;
+	cfg.shared_hfov_deg = shared_hfov;
 	struct xrt_tracking_plugin_iface *it = NULL;
 
 	if (strcmp(mode, "hands-negotiate") == 0) {

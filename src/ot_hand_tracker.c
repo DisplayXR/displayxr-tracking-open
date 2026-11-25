@@ -440,3 +440,11 @@ ot_hand_tracker_process(
 	}
 	return true;
 }
+
+void
+ot_hand_tracker_set_detect_min(struct ot_hand_tracker *t, float min_score)
+{
+	if (t != NULL && min_score > 0.0f && min_score < 1.0f) {
+		t->cfg.detect_min_score = min_score;
+	}
+}
