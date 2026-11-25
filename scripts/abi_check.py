@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 
-HEADERS = ["xrt_device.h", "xrt_tracking.h", "xrt_plane_detector.h", "xrt_visibility_mask.h", "xrt_input_plugin.h", "xrt_tracking_plugin.h", "xrt_camera_pose.h",
+HEADERS = ["xrt_device.h", "xrt_tracking.h", "xrt_plane_detector.h", "xrt_visibility_mask.h", "xrt_input_plugin.h", "xrt_tracking_plugin.h", "xrt_camera_pose.h", "xrt_stereo_camera.h", "xrt_component_license.h",
            "xrt_component_settings.h"]
 # Members the neutral headers rename: ours -> the runtime's.
 RENAMED = {

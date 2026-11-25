@@ -33,7 +33,7 @@ VENDOR = re.compile(
     r"vive|wmr|pico4?|pico_neo3|odyssey|samsung|oculus|valve|htc|quest(_[12])?|rift|hololens|knuckles|"
     r"hydra|psmv|pssense|daydream|ml2|meta|bytedance|varjo|reverb|g2|huawei|xbox|ultraleap|leap|"
     r"realsense|depthai|lighthouse|ligthhouse|blubur|oppo|fb|razer|hp|msft|index|go_controller|"
-    r"touch|cosmos|focus3|neo3|tundra|sony|playstation|magic_leap|windows mixed"
+    r"touch|cosmos|focus3|neo3|tundra|sony|playstation|magic_leap|windows mixed|mx_ink|mx ink|logitech"
     r")(?![a-z0-9])",
     re.IGNORECASE,
 )
@@ -46,12 +46,12 @@ STRICT = {
     "vive", "vivepro", "wmr", "pico", "pico4", "neo3", "odyssey", "samsung", "oculus", "valve", "htc", "quest",
     "rift", "hololens", "knuckles", "hydra", "psmv", "pssense", "daydream", "ml2", "bytedance",
     "varjo", "reverb", "huawei", "xbox", "ultraleap", "leap", "realsense", "depthai", "lighthouse",
-    "blubur", "oppo", "fb", "msft", "meta", "cosmos", "focus3", "tundra", "magicleap",
+    "blubur", "oppo", "fb", "msft", "meta", "cosmos", "focus3", "tundra", "magicleap", "logitech",
 }
 COMBOS = re.compile(
     r"(^|_)(index_(controller|haptic|system|a_|b_|squeeze|trigger|thumb|trackpad|grip|aim)|"
     r"touch_(controller|haptic|pro|plus|x_|y_|a_|b_|menu|system|squeeze|trigger|thumb|grip|aim)|"
-    r"go_(controller|system|trigger|back|trackpad|grip|aim)|g2_|hp_|ml2_|mndx_)",
+    r"go_(controller|system|trigger|back|trackpad|grip|aim)|g2_|hp_|ml2_|mndx_|mx_ink)",
     re.IGNORECASE,
 )
 
