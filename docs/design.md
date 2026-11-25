@@ -64,8 +64,10 @@ Chosen per machine, in order:
    Model spike: the hand-landmark model holds on greyscale once seeded, but the palm detector
    loses about half the hands, so re-detection needs a seed (a face-anchored region, or a lower
    detector threshold confirmed by landmark presence).
-   **Scope:** the shared stream carries frames only while the display tracks a viewer on that
-   screen (a 3D session there). A camera consumer does not wake the tracker; the source sits in
+   **Scope:** on the display measured, the shared stream carried frames only while the display
+   tracked a viewer on that screen (a 3D session there); the runtime now documents that this is
+   the vendor's behaviour and that a newer one streams on open (input-provider spec §4d), so the
+   provider follows the stream's state rather than assuming either. A camera consumer does not wake the tracker; the source sits in
    `WAITING` with no frames otherwise. The hands role therefore works on this source only during
    a 3D session on that screen, unless the display vendor adds a camera-only wake or the
    provider can register as a tracking party — both outside this repo.
@@ -381,7 +383,10 @@ step for it is open). The focal length comes from `HFOV_DEG` × the camera pose'
   (fine on macOS, a conflict on Windows unless the frame server shares the device).
 - A per-user hand-size calibration (`HAND_SCALE`), e.g. from the viewer's calibrated depth when a
   hand touches a known point, or from the shared stereo camera's triangulation (§3, path 1).
-- The display's shared stereo camera (§3, path 1) is not consumed yet: it needs the runtime's
-  camera-consumer path and greyscale re-detection.
+- The display's shared stereo camera (§3, path 1) is consumed since the runtime's input host
+  carries `open_shared_camera` (input-provider spec §4d): the models run on the left eye's grey,
+  the detector at a lower threshold confirmed by landmark presence, and the pair measures the
+  hand-size factor (README, "How the hands role works"). Open: a run on a real panel, and the
+  display's declared camera pose (runtime #2296) in place of the bezel prior.
 - Thumb orientation (a proper thumb frame), and `XR_EXT_hand_interaction` / aim-pose conventions
   beyond `khr/simple_controller`.

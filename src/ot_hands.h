@@ -125,6 +125,19 @@ ot_hands_update(struct ot_hands *h,
                 struct ot_hand_state out[2]);
 
 /*!
+ * The 21 points of @p o in the camera frame, placed as ot_hands_update places
+ * them (the hand-size factor, the pose's focal scale), and the camera -> wrist
+ * distance. False when it cannot be placed.
+ */
+bool
+ot_hands_place_camera(const struct ot_intrinsics *k,
+                      const struct ot_hands_params *p,
+                      const struct ot_cam_pose *pose,
+                      const struct ot_hand_obs *o,
+                      float (*cam)[3],
+                      float *depth_m);
+
+/*!
  * The camera -> wrist distance of @p o, placed as ot_hands_update places it.
  * False when it cannot be placed.
  */

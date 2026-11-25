@@ -70,6 +70,7 @@ set(OPENTRACK_CORE_SOURCES
 	src/ot_pack.c
 	src/ot_platform.c
 	src/ot_sha256.c
+	src/ot_stereo.c
 	src/ot_viewer.c)
 
 # Capture: AVFoundation on macOS; Windows (Media Foundation) and Linux (V4L2) are follow-ups.
@@ -88,6 +89,7 @@ add_library(${OPENTRACK_PROVIDER} MODULE
 	src/ot_face_tracker.c
 	src/ot_hand_tracker.c
 	src/ot_ort.c
+	src/ot_shared_camera.c
 	${OPENTRACK_CORE_SOURCES}
 	${OPENTRACK_CAPTURE_SOURCES})
 target_include_directories(${OPENTRACK_PROVIDER} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -196,7 +198,7 @@ if(OPENTRACK_BUILD_TESTS)
 		target_link_libraries(open-tracking-hand-tests PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
 	endif()
 	opentrack_warnings(open-tracking-hand-tests)
-	foreach(_case hand-decode hand-roi hand-place hand-chirality hand-joints hands)
+	foreach(_case hand-decode hand-roi hand-place hand-chirality hand-joints hands stereo)
 		add_test(NAME unit-${_case} COMMAND open-tracking-hand-tests ${_case})
 	endforeach()
 	add_test(NAME unit-capture-share COMMAND open-tracking-hand-tests capture-share ${CMAKE_BINARY_DIR})
@@ -241,7 +243,21 @@ if(OPENTRACK_BUILD_TESTS)
 		--expect left --set EP=cpu --set HFOV_DEG=65 --set STATS_S=1)
 	add_test(NAME hands-mirror COMMAND ${_fh} ${_bin} hands --models ${_models} --image ${_models}/images/hand.ppm
 		--expect right --set EP=cpu --set HFOV_DEG=65 --set MIRROR=1)
-	set_tests_properties(hands-blank hands hands-mirror PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+	# The display's shared stereo camera (the fake host's rectified GRAY8 pair, built from the hand photo): the hand
+	# through grey frames, its depth from the pair (a plane at f B / d = 0.155 m, nearer than the hand-size prior
+	# puts it); a runtime without the camera falls back to the webcam; a stream that never delivers is ABSENT; and
+	# SOURCE=shared on a runtime without the slots declines.
+	add_test(NAME hands-shared COMMAND ${_fh} ${_bin} hands --models ${_models} --shared ok
+		--shared-image ${_models}/images/hand.ppm --shared-hfov 65 --baseline 60 --disparity 247.9 --expect left
+		--expect-shared --expect-depth 0.155 --set SOURCE=shared --set EP=cpu --set STATS_S=1)
+	add_test(NAME hands-shared-fallback COMMAND ${_fh} ${_bin} hands --models ${_models} --shared unsupported
+		--image ${_models}/images/hand.ppm --expect left --set EP=cpu --set HFOV_DEG=65)
+	add_test(NAME hands-shared-waiting COMMAND ${_fh} ${_bin} hands-shared-waiting --models ${_models} --shared waiting
+		--set SOURCE=shared --set EP=cpu)
+	add_test(NAME hands-decline-shared COMMAND ${_fh} ${_bin} hands-decline-shared --models ${_models}
+		--set SOURCE=shared)
+	set_tests_properties(hands-blank hands hands-mirror hands-shared hands-shared-fallback hands-shared-waiting
+		PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 	set_tests_properties(hands-blank PROPERTIES DEPENDS blank) # blank writes the frame
 	if(APPLE)
 		add_test(NAME face-coreml COMMAND ${_fh} ${_bin} face --models ${_models}

@@ -58,7 +58,7 @@ ot_mailbox_put(struct ot_mailbox *mb,
                int64_t capture_ns,
                int64_t arrival_ns)
 {
-	const uint32_t bpp = fmt == OT_FMT_BGRA ? 4u : 3u;
+	const uint32_t bpp = ot_pixel_bytes(fmt);
 	const size_t row = (size_t)w * bpp;
 	const size_t need = row * h;
 	ot_lock(&mb->lock);

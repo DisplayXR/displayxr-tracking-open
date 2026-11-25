@@ -30,7 +30,19 @@ enum ot_pixel_format
 {
 	OT_FMT_BGRA = 0, //!< 4 bytes per pixel, B G R A (AVFoundation's 32BGRA)
 	OT_FMT_RGB = 1,  //!< 3 bytes per pixel
+	/*!
+	 * 1 byte per pixel, grey (a tracker camera's monochrome frames). The samplers replicate it into R = G = B:
+	 * the models were trained on colour, so a grey (often infrared) frame is an input they never saw.
+	 */
+	OT_FMT_GRAY8 = 2,
 };
+
+//! Bytes per pixel of @p f.
+static inline uint32_t
+ot_pixel_bytes(enum ot_pixel_format f)
+{
+	return f == OT_FMT_BGRA ? 4u : f == OT_FMT_GRAY8 ? 1u : 3u;
+}
 
 struct ot_image
 {

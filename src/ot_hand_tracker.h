@@ -89,6 +89,13 @@ ot_hand_tracker_create(struct ot_ort *ort,
 void
 ot_hand_tracker_destroy(struct ot_hand_tracker *t);
 
+/*!
+ * Change the palm detector's score threshold (the config's detect_min_score) from the next frame on, e.g. lower
+ * for a grey source; the landmark model's presence still confirms every detection.
+ */
+void
+ot_hand_tracker_set_detect_min(struct ot_hand_tracker *t, float min_score);
+
 //! How much of each model Core ML took, or "".
 void
 ot_hand_tracker_ep_report(const struct ot_hand_tracker *t, char *buf, size_t cap);

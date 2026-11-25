@@ -5,8 +5,9 @@
  * @brief  Unit tests of the hands role's pure parts: palm decoding and the
  *         hand ROIs, placing the metric hand along the rays (monocular depth),
  *         handedness from the 3D shape, the 21 -> 26 joint mapping, the side
- *         assignment and per-frame mapping, and the process-wide camera
- *         sharing (on the file camera).
+ *         assignment and per-frame mapping, the process-wide camera
+ *         sharing (on the file camera), stereo on a rectified pair (the
+ *         shared camera's hand-size factor) and grey frames in the sampler.
  *
  *     open-tracking-hand-tests <case> [scratch dir]
  */
@@ -16,6 +17,7 @@
 #include "ot_hand_pose.h"
 #include "ot_hands.h"
 #include "ot_platform.h"
+#include "ot_stereo.h"
 
 #include <math.h>
 #include <stdarg.h>
@@ -611,6 +613,140 @@ test_capture_share(const char *dir)
 	remove(path);
 }
 
+/*
+ *
+ * Stereo on a rectified pair, and grey frames.
+ *
+ */
+
+//! A smooth random texture (a few octaves of value noise), deterministic.
+static void
+make_texture(uint8_t *img, uint32_t w, uint32_t h)
+{
+	uint32_t seed = 12345u;
+	float *acc = (float *)calloc((size_t)w * h, sizeof(float));
+	for (uint32_t cell = 4; cell <= 32; cell *= 2) {
+		const uint32_t gw = w / cell + 2, gh = h / cell + 2;
+		float *g = (float *)malloc(sizeof(float) * gw * gh);
+		for (uint32_t i = 0; i < gw * gh; i++) {
+			seed = seed * 1664525u + 1013904223u;
+			g[i] = (float)(seed >> 8) / (float)(1u << 24);
+		}
+		for (uint32_t y = 0; y < h; y++) {
+			for (uint32_t x = 0; x < w; x++) {
+				const float fx = (float)x / (float)cell, fy = (float)y / (float)cell;
+				const uint32_t x0 = (uint32_t)fx, y0 = (uint32_t)fy;
+				const float tx = fx - (float)x0, ty = fy - (float)y0;
+				const float a = g[y0 * gw + x0], b = g[y0 * gw + x0 + 1], c = g[(y0 + 1) * gw + x0],
+				            d = g[(y0 + 1) * gw + x0 + 1];
+				acc[y * w + x] +=
+				    (a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty) * (float)cell;
+			}
+		}
+		free(g);
+	}
+	float lo = 1e9f, hi = -1e9f;
+	for (uint32_t i = 0; i < w * h; i++) {
+		lo = acc[i] < lo ? acc[i] : lo;
+		hi = acc[i] > hi ? acc[i] : hi;
+	}
+	for (uint32_t i = 0; i < w * h; i++) {
+		img[i] = (uint8_t)(20.0f + 215.0f * (acc[i] - lo) / (hi - lo));
+	}
+	free(acc);
+}
+
+//! right(x) = left(x + d): a fronto-parallel plane at disparity d.
+static void
+shift_right(const uint8_t *l, uint8_t *r, uint32_t w, uint32_t h, float d)
+{
+	for (uint32_t y = 0; y < h; y++) {
+		for (uint32_t x = 0; x < w; x++) {
+			float sx = (float)x + d;
+			sx = sx < 0.0f ? 0.0f : sx > (float)(w - 1) ? (float)(w - 1) : sx;
+			const uint32_t x0 = (uint32_t)sx, x1 = x0 + 1 < w ? x0 + 1 : x0;
+			const float t = sx - (float)x0;
+			r[y * w + x] = (uint8_t)(l[y * w + x0] + (l[y * w + x1] - l[y * w + x0]) * t + 0.5f);
+		}
+	}
+}
+
+static void
+test_stereo(void)
+{
+	enum
+	{
+		W = 320,
+		H = 200
+	};
+	static uint8_t l[W * H], r[W * H];
+	make_texture(l, W, H);
+	const float d_true = 30.4f;
+	shift_right(l, r, W, H, d_true);
+	const struct ot_image li = {l, W, H, W, OT_FMT_GRAY8, false};
+	const struct ot_image ri = {r, W, H, W, OT_FMT_GRAY8, false};
+
+	float d = 0, ncc = 0;
+	bool ok = ot_stereo_disparity(&li, &ri, 200.0f, 100.0f, 10.0f, 60.0f, 5, &d, &ncc);
+	check(ok && approx(d, d_true, 0.25), "disparity of a shifted texture: %.2f px (true %.2f), NCC %.3f", d, d_true,
+	      ncc);
+	ok = ot_stereo_disparity(&li, &ri, 200.0f, 100.0f, 35.0f, 60.0f, 5, &d, &ncc);
+	check(!ok, "the true disparity outside the range: no match (the best is at the range's end)");
+	static uint8_t flat[W * H];
+	memset(flat, 128, sizeof(flat));
+	const struct ot_image fi = {flat, W, H, W, OT_FMT_GRAY8, false};
+	check(!ot_stereo_disparity(&fi, &fi, 200.0f, 100.0f, 10.0f, 60.0f, 5, &d, &ncc), "no texture: no match");
+	check(!ot_stereo_disparity(&li, &ri, 2.0f, 100.0f, 10.0f, 60.0f, 5, &d, &ncc),
+	      "a patch off the left image: no match");
+
+	// A hand whose palm points are placed at 0.5 m; the pair says f B / d.
+	const float f = 200.0f, b = 0.06f;
+	float lm[OT_HAND_LM_COUNT][3], cam[OT_HAND_LM_COUNT][3];
+	memset(lm, 0, sizeof(lm));
+	memset(cam, 0, sizeof(cam));
+	for (int i = 0; i < OT_HAND_LM_COUNT; i++) {
+		lm[i][0] = 150.0f + 4.0f * (float)(i % 5);
+		lm[i][1] = 140.0f - 4.0f * (float)i;
+		cam[i][2] = 0.5f;
+	}
+	lm[OT_HL_WRIST][0] = 170.0f;
+	lm[OT_HL_WRIST][1] = 150.0f;
+	lm[OT_HL_MIDDLE_MCP][0] = 170.0f;
+	lm[OT_HL_MIDDLE_MCP][1] = 90.0f;
+	float ratio = 0;
+	uint32_t n = 0;
+	ok = ot_stereo_hand_ratio(&li, &ri, f, b, (const float(*)[3])lm, (const float(*)[3])cam, &ratio, &n);
+	const float want = (f * b / d_true) / 0.5f;
+	check(ok && n >= OT_STEREO_MIN_POINTS && approx(ratio, want, 0.01),
+	      "hand ratio: stereo / placed depth %.3f (true %.3f) from %u palm points", ratio, want, n);
+	ok = ot_stereo_hand_ratio(&fi, &fi, f, b, (const float(*)[3])lm, (const float(*)[3])cam, &ratio, &n);
+	check(!ok && n == 0, "a textureless pair measures nothing");
+
+	float s = 1.0f;
+	for (int i = 0; i < 100; i++) {
+		s = ot_stereo_scale_update(s, 1.4f / s, 0.1f); // the pair keeps saying "1.4 x the user's prior"
+	}
+	check(approx(s, 1.4, 0.005), "the hand-size factor settles on what the pair measures (%.3f)", s);
+	s = 1.0f;
+	for (int i = 0; i < 200; i++) {
+		s = ot_stereo_scale_update(s, 10.0f, 0.1f);
+	}
+	check(approx(s, OT_STEREO_SCALE_MAX, 1e-6), "clamped to %.1f (%.3f)", OT_STEREO_SCALE_MAX, s);
+	check(ot_stereo_scale_update(1.2f, 0.0f, 0.1f) == 1.2f, "a non-positive ratio changes nothing");
+
+	// Grey frames: the sampler replicates the grey into R = G = B.
+	struct ot_affine id = {1, 0, 0, 0, 1, 0};
+	float nhwc[4 * 4 * 3];
+	ot_sample_affine(&li, &id, 4, 4, 1.0f, 0.0f, false, nhwc);
+	bool grey_ok = true;
+	for (int i = 0; i < 16; i++) {
+		const float want_v = l[(i / 4) * W + (i % 4)] / 255.0f;
+		grey_ok = grey_ok && approx(nhwc[i * 3], want_v, 1e-5) && nhwc[i * 3] == nhwc[i * 3 + 1] &&
+		          nhwc[i * 3] == nhwc[i * 3 + 2];
+	}
+	check(grey_ok, "a GRAY8 frame samples as R = G = B = its grey");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -633,6 +769,9 @@ main(int argc, char **argv)
 	}
 	if (all || strcmp(which, "hands") == 0) {
 		test_hands();
+	}
+	if (all || strcmp(which, "stereo") == 0) {
+		test_stereo();
 	}
 	if (all || strcmp(which, "capture-share") == 0) {
 		test_capture_share(argc > 2 ? argv[2] : NULL);

@@ -6,15 +6,17 @@ tracking** (`XR_EXT_hand_tracking` joints), with open models only. It is what a 
 tracker of its own: a laptop webcam is enough for head-coupled parallax.
 
 > **Status: the viewer role and the hands role work on macOS** (AVFoundation capture, ONNX
-> Runtime with Core ML). The hands role is verified end to end on still images through its ABI,
-> not yet on a live camera. Windows (Media Foundation) and Linux (V4L2) capture and the installers
-> are follow-ups; on those OSes the provider builds and declines in `probe`. Design:
+> Runtime with Core ML). The hands role also reads the display's shared stereo camera where the
+> runtime offers it (any OS, in the service; verified against the fake host, not yet on a panel).
+> Windows (Media Foundation) and Linux (V4L2) webcam capture and the installers are follow-ups;
+> on those OSes the viewer role declines in `probe`, and the hands role does too unless the
+> runtime offers the shared camera. Design:
 > [`docs/design.md`](docs/design.md) (hands: §11).
 
 | Role | Runtime class | Registry id | Status |
 |---|---|---|---|
 | Head + eye positions | viewer-tracking provider (ABI 1) | `open-tracking` | macOS |
-| Hand joints (26 per hand), pinch | input provider (ADR-034, input ABI 1) | `open-tracking-hands` | macOS |
+| Hand joints (26 per hand), pinch | input provider (ADR-034, input ABI 1) | `open-tracking-hands` | macOS (webcam); any OS whose runtime shares the display's stereo camera (code-complete, not yet run on a panel) |
 
 - **A display that tracks the viewer itself always wins** (runtime policy): on such a screen this
   provider stays in standby and never opens a camera. It serves screens whose display declares
@@ -68,7 +70,52 @@ One thread per started provider. Per camera frame (the newest; older ones are dr
 
 ## How the hands role works
 
-Same binary, its own thread, started by the first joint locate (design §11). Per camera frame:
+Same binary, its own thread, started by the first joint locate (design §11).
+
+**Source** (`SOURCE`, default `auto`): the display's own **shared stereo camera** when the runtime
+offers it, else a webcam. The shared camera comes through the input host's public slots
+(`open_shared_camera` / `camera_acquire` / `camera_release` / `close_shared_camera`, runtime
+input-provider spec §4d, ADR-043 Amendment 6): the runtime keeps the camera, applies its consent,
+sharing toggle, session lock and in-use indicator, and hands out RECTIFIED side-by-side frames (left
+eye = left half, never mirrored, usually 8-bit grey) with their rectified calibration (one focal
+length and principal point for both eyes, the right eye one baseline along the left eye's image
++x). Only an input provider loaded **in the service** gets it: an in-process runtime has no camera
+manager, the open fails, and `auto` falls back to a webcam (on Windows and Linux, which have no
+webcam backend yet, the hands then stay ABSENT). While a webcam serves, the shared camera is tried
+again every 30 s; a refused consent is not asked again in that process.
+
+On the shared camera:
+
+- **One eye for the models.** The palm detector and the landmark model run on the **left** eye's
+  image, its grey replicated into R = G = B. Both models were trained on colour photographs, and a
+  tracker camera is often infrared-lit: grey skin has less contrast against the background than
+  colour, so detection is expected to be weaker than on a webcam (fewer palms found at a distance,
+  lower presence). On the CC0 hand photo turned grey, detection, handedness (P(right) 0.09) and the
+  joints are unchanged. An earlier spike on a real tracker camera (design §3) found the landmark
+  model holds on grey once seeded but the palm detector misses about half the hands, so on this
+  source the detector runs at `SHARED_DETECT_MIN` (0.3) and the landmark presence confirms. How
+  it fares live is what the panel test measures.
+- **The pair measures the hand's size** (`STEREO=1`). Per analysed frame, each hand's palm points
+  (wrist, the thumb's base, the four knuckles) are matched along the same row of the right eye
+  (normalised cross-correlation, sub-pixel), giving each a stereo depth `f·B/d`; the median of
+  stereo depth / placed depth is folded into the hand-size factor (10 % of the way per frame, in
+  log space, clamped 0.6–1.6; `HAND_SCALE` is where it starts). So the depth's scale comes from the
+  pair while the frame-to-frame motion stays the monocular fit's, which is smooth and reprojects
+  exactly. This is simpler and steadier than triangulating every landmark (fingers against the
+  background, motion blur and a weak grey texture make per-landmark disparities noisy), and it
+  removes the hand-size prior's 2.5–4 cm depth bias at 40 cm. `STEREO=0` uses one eye only.
+- **Pose**: the intrinsics are the rectified calibration's (not `HFOV_DEG`). The camera's place on
+  the panel is asked of the runtime (`get_camera_pose`, keyed by the camera's persistent id), whose
+  answer names the pair's centre; the left eye is half a baseline toward the camera frame's +X.
+  Until the runtime carries the display's declared camera pose (runtime issue #2296), that answer is
+  the top-centre-of-the-bezel prior with no tilt: a tracker camera pitched toward the face then
+  rotates the hands about the camera by that pitch.
+- **Presence follows the stream** (input-provider spec §4d.2): PRESENT while frames flow; ABSENT
+  while the display delivers frames only during a 3D session and none holds its tracker, while the
+  stream is suspended (session locked, sharing off) or after it ended. ABSENT for such a reason
+  turns PRESENT again 30 s later, so the next app's joint locate retries.
+
+Per camera frame:
 
 1. **Palm detection** (full, 192², letterboxed) only when fewer hands are followed than
    `MAX_HANDS`: every frame with none, every `DETECT_EVERY` frames with one.
@@ -97,7 +144,8 @@ Same binary, its own thread, started by the first joint locate (design §11). Pe
    `PREDICT_MAX_MS`). `CONTROLLERS=1` publishes left / right `khr/simple_controller` devices
    instead (select = pinch, grip / aim = the palm), which then take the controller roles.
 
-Presence is `PRESENT` while a usable camera exists (no hand in view = inactive joints).
+Presence is `PRESENT` while a usable camera exists (no hand in view = inactive joints); on the
+shared camera it follows the stream (above).
 `IDLE_S` seconds after the last locate the camera closes. The provider fills `struct xrt_device`
 from the vendored header, which has no `struct_size`: a runtime that changes it needs a rebuild.
 
@@ -243,6 +291,8 @@ ctest --test-dir build --output-on-failure
 | `unit-hands`, `unit-capture-share` | side assignment, display = T + R·p (incl. a pitched camera), velocity, loss; one shared stream per device (file camera) | no |
 | `hands-negotiate`, `hands-decline-*` | the input ABI gate, settings, presence UNKNOWN before probe; probe declines cleanly | no |
 | `hands-blank`, `hands`, `hands-mirror`, `hands-coreml` | through the input ABI with the file camera: two hand trackers on a RIG_LOCAL origin, PRESENT, nothing active on a grey frame; on a CC0 left-hand photo only the left hand, plausible metric joints, thumb side, bone axes (mirrored: the right hand) | yes |
+| `unit-stereo` | disparity of a shifted texture to 0.1 px, no match outside the range / without texture / off the image, the palm ratio, the hand-size factor settling and its clamp, a grey frame sampled as R = G = B | no |
+| `hands-shared`, `hands-shared-fallback`, `hands-shared-waiting`, `hands-decline-shared` | the fake host's shared stereo camera (the hand photo as a rectified grey pair, the right eye shifted to put the plane at 0.155 m): the left hand through grey frames, its palm at the pair's depth (the prior alone says 0.18 m); a runtime whose open fails falls back to the webcam; a stream that never delivers leaves no hand and ABSENT; `SOURCE=shared` without the slots declines | yes (not `hands-decline-shared`) |
 | `check-pack` | the pack validator | no |
 
 **`otr-probe`** runs the provider on a real camera and prints, every second, samples/s,
@@ -301,6 +351,12 @@ defaults to `coreml` on macOS (`cpu` elsewhere), plus:
 | `DETECT_MIN`, `PRESENCE_MIN`, `DETECT_EVERY` | 0.5, 0.5, 5 | palm detector threshold; landmark presence; with one hand followed, look for the other every N frames |
 | `PREDICT_MAX_MS` | 50 | how far past the newest frame a locate extrapolates |
 | `IDLE_S` | 5 | close the camera this long after the last locate; 0 = never |
+| `SOURCE` | auto | `auto`: the display's shared stereo camera when the runtime opens it, else a webcam; `shared`: only the display's camera (probe declines on a runtime without the slots); `webcam`: never the display's camera |
+| `STEREO` | 1 | shared camera: the pair measures the hand-size factor (`HAND_SCALE` is its start); 0 = one eye only |
+| `SHARED_FPS` | 30 | shared camera: delivery cap in Hz (0 = the camera's rate) |
+| `SHARED_DETECT_MIN` | 0.3 | shared camera: the palm detector's threshold on its grey frames, lower than `DETECT_MIN` because the detector loses about half the hands on grey (design §3); the landmark model's presence (`PRESENCE_MIN`) still has to confirm each one |
+| `LOG_FRAMES` | 0 | 1: one log line per analysed frame: whether the detector ran, palms found and the best score, per hand its track, P(right), presence, the middle knuckle and the box in the image (normalised, `edge` when it touches the border), per side the published palm. For coverage tests; it is a lot of log |
+| `LOG_FILE` | | also append the log lines to this file (a provider in the service has no console); frames are never written |
 
 ## Registration
 
@@ -312,8 +368,11 @@ the same binary). Development: put it in a directory with the runtime's sim plug
 manifests and point `XRT_PLUGIN_SEARCH_PATH` at it; `displayxr-cli status --json` then reports
 `viewer_source: "provider:open-tracking"` for a simulated display. Windows:
 `HKLM\Software\DisplayXR\TrackingProviders\open-tracking` and
-`HKLM\Software\DisplayXR\InputProviders\open-tracking-hands` (`Binary`, `ProbeOrder`, `Settings`)
-— once the Windows capture exists.
+`HKLM\Software\DisplayXR\InputProviders\open-tracking-hands` (`Binary`, `ProbeOrder`, `Settings`).
+The viewer role needs the Windows capture first; the hands role works there today through the
+display's shared camera (a dev build: the runtime's `scripts\register_dev_plugin.bat input
+<path>\DisplayXR-OpenTracking.dll open-tracking-hands` writes the row and allowlists the DLL for the
+provenance gate, which also lets it open the shared camera without a consent prompt).
 
 The install tree (`cmake --install build`, with `-DOPENTRACK_INSTALL_MODELS_DIR=models-cache` to
 include the blobs) is flat: the provider, `libonnxruntime`, the pack, the four models, `licenses/`.
@@ -344,9 +403,16 @@ pointing at the runtime's `scripts/macos_sign_notarize.sh` (ad-hoc without signi
 ## Follow-ups
 
 - Windows capture (Media Foundation; DirectML build of ONNX Runtime) and Linux capture (V4L2).
-- Hands: a live-camera test (incl. two hands), a per-user hand-size calibration, the display's
-  shared stereo camera as a source, a proper thumb frame; under the service the two roles run in
+  Deferred on purpose: a webcam backend must never open a display's own tracker camera (ADR-043
+  Amendment 5; open/close cycles have wedged one), and the runtime's list of claimed cameras is not
+  exposed to providers. The safe order is a runtime host slot that answers "may I open this
+  device?" first, then the backends. On Windows the hands come from the shared camera meanwhile.
+- Hands: a live-camera test (incl. two hands), a per-user hand-size calibration on a webcam (the
+  shared camera measures it), a proper thumb frame; under the service the two roles run in
   different processes (design §11.7).
+- Hands on the shared camera: the panel test (does a tracker camera aimed at the face see hands at
+  all, and does grey input detect them); the display's declared camera pose (runtime #2296) instead
+  of the bezel prior; per-landmark stereo if the scale-only fold proves too coarse.
 - Installers (`DisplayXROpenTrackingSetup-*.exe`, `.deb`; the macOS `.pkg` ships), the meta-installer's "Tracking
   providers" section, `versions.json` `tracking_open`, signing / the Windows allowlist row.
 - Camera intrinsics: a per-camera HFOV / distortion table, or a calibration step.

@@ -4,15 +4,16 @@
  * @file
  * @brief  DisplayXR-OpenTracking's hands role: the open input provider
  *         `open-tracking-hands`. Both hands' XR_EXT_hand_tracking joints from
- *         a plain webcam, through the MediaPipe palm detector + hand landmarks
- *         on ONNX Runtime — the same binary, and in one process the same
- *         camera stream, as the viewer role (`open-tracking`).
+ *         the display's own shared stereo camera when the runtime offers it,
+ *         else a plain webcam, through the MediaPipe palm detector + hand
+ *         landmarks on ONNX Runtime — the same binary, and in one process the
+ *         same webcam stream, as the viewer role (`open-tracking`).
  *
  * Contract: the runtime's `xrt/xrt_input_plugin.h` (ABI 1) and
  * `docs/specs/runtime/input-provider-discovery.md`. Shape:
  *  - probe: cheap, opens nothing (settings, the pack's hand models by size,
- *    ONNX Runtime loads, a camera is enumerated, the OS camera permission is
- *    not denied);
+ *    ONNX Runtime loads; then a source: the runtime's shared-camera slots, or
+ *    a webcam that enumerates and whose OS permission is not denied);
  *  - create_devices: two hand-tracker devices (left, right) — or, with
  *    CONTROLLERS=1, two khr/simple_controller devices carrying the same joints
  *    (select = pinch, grip / aim = the palm). Cheap: the devices are per
@@ -21,8 +22,16 @@
  *    provider's thread, which verifies the models, creates the sessions, opens
  *    the camera and publishes both hands per analysed frame; IDLE_S seconds
  *    after the last locate it closes the camera and ends;
+ *  - sources (SOURCE): the display's shared stereo camera first (the input
+ *    host's open_shared_camera, input-provider spec §4d: RECTIFIED GRAY8 side
+ *    by side, consent and indicator the runtime's), the models run on the LEFT
+ *    eye's grey replicated to RGB, and the pair measures the hand-size factor
+ *    (ot_stereo.h); a webcam when that camera cannot be opened;
  *  - get_presence: PRESENT while a usable camera exists (hands out of view are
- *    inactive joints, never ABSENT);
+ *    inactive joints, never ABSENT); on the shared camera it follows the
+ *    stream (ABSENT while it waits for a 3D session, is suspended or ended).
+ *    ABSENT for a reason that may pass turns PRESENT again 30 s later, so the
+ *    next app's locate retries;
  *  - get_engaged_ns (CONTROLLERS=1 only): the last time each hand pinched, so
  *    the controller role goes to the hands when one pinches and back to the
  *    keyboard and mouse when they are used (ADR-034 Amendment 6). The runtime
@@ -48,6 +57,8 @@
 #include "ot_ort.h"
 #include "ot_pack.h"
 #include "ot_platform.h"
+#include "ot_shared_camera.h"
+#include "ot_stereo.h"
 
 #include <math.h>
 #include <stdarg.h>
@@ -80,6 +91,15 @@ static const struct xrt_component_setting_desc g_descs[] = {
     {"ENABLE", XRT_COMPONENT_SETTING_TYPE_BOOL, "1",
      "0: probe declines. On by default: installing the provider is the opt-in; the camera opens only while an "
      "app locates hand joints"},
+    {"SOURCE", XRT_COMPONENT_SETTING_TYPE_ENUM, "auto",
+     "auto | shared | webcam. auto: the display's shared stereo camera when the runtime offers it, else a webcam; "
+     "shared: only the display's camera; webcam: never the display's camera"},
+    {"STEREO", XRT_COMPONENT_SETTING_TYPE_BOOL, "1",
+     "shared camera: 1 = the pair measures the hand-size factor (HAND_SCALE becomes the starting value); 0 = one eye "
+     "only"},
+    {"SHARED_FPS", XRT_COMPONENT_SETTING_TYPE_FLOAT, "30", "shared camera: delivery cap in Hz; 0 = the camera's rate"},
+    {"SHARED_DETECT_MIN", XRT_COMPONENT_SETTING_TYPE_FLOAT, "0.3",
+     "shared camera: palm detector threshold on its grey frames (lower than DETECT_MIN; landmark presence confirms)"},
     {"DEVICE", XRT_COMPONENT_SETTING_TYPE_STRING, "",
      "camera: empty = the built-in camera (else the first), an index, or a substring of the name. Use the viewer "
      "role's value: one device, one stream for both roles"},
@@ -121,9 +141,14 @@ static const struct xrt_component_setting_desc g_descs[] = {
     {"PERMISSION_TIMEOUT_S", XRT_COMPONENT_SETTING_TYPE_INT, "120",
      "how long the thread waits for the user to answer the OS camera prompt"},
     {"STATS_S", XRT_COMPONENT_SETTING_TYPE_INT, "0", "> 0: log rate and per-stage timings every N seconds"},
+    {"LOG_FRAMES", XRT_COMPONENT_SETTING_TYPE_BOOL, "0",
+     "1: one log line per analysed frame (hands found, where they are in the image, the published palms)"},
+    {"LOG_FILE", XRT_COMPONENT_SETTING_TYPE_STRING, "",
+     "also append the log lines to this file (a provider in a service has no console); never frames"},
 };
 
 static const struct xrt_input_plugin_host_iface *g_host = NULL;
+static FILE *g_log_fp = NULL; //!< LOG_FILE, opened once by probe
 
 static void
 log_line(const char *fmt, ...)
@@ -135,6 +160,10 @@ log_line(const char *fmt, ...)
 	va_end(ap);
 	fprintf(stderr, "[" OTH_ID "] %s\n", buf);
 	fflush(stderr);
+	if (g_log_fp != NULL) {
+		fprintf(g_log_fp, "%.3f [" OTH_ID "] %s\n", (double)ot_monotonic_ns() * 1e-9, buf);
+		fflush(g_log_fp);
+	}
 }
 
 #define HOST_HAS(FIELD)                                                                                                \
@@ -195,8 +224,19 @@ describe_settings(const struct xrt_component_setting_desc **out_descs)
 	return (uint32_t)(sizeof(g_descs) / sizeof(g_descs[0]));
 }
 
+enum oth_source_pref
+{
+	OTH_SOURCE_AUTO = 0,
+	OTH_SOURCE_SHARED,
+	OTH_SOURCE_WEBCAM,
+};
+
 struct oth_config
 {
+	enum oth_source_pref source;
+	bool stereo;
+	float shared_fps;
+	float shared_detect_min;
 	char device[256];
 	struct ot_capture_request req;
 	float hfov_deg;
@@ -216,12 +256,31 @@ struct oth_config
 	uint32_t idle_s;
 	uint32_t permission_timeout_ms;
 	uint32_t stats_s;
+	bool log_frames;
+	char log_file[2048];
 };
 
 static void
 read_config(struct oth_config *c)
 {
 	memset(c, 0, sizeof(*c));
+	char src[16];
+	c->source = OTH_SOURCE_AUTO;
+	if (setting("SOURCE", src, sizeof(src))) {
+		if (strcmp(src, "shared") == 0) {
+			c->source = OTH_SOURCE_SHARED;
+		} else if (strcmp(src, "webcam") == 0) {
+			c->source = OTH_SOURCE_WEBCAM;
+		} else if (strcmp(src, "auto") != 0 && src[0] != '\0') {
+			log_line("SOURCE '%s' is not auto | shared | webcam: using auto", src);
+		}
+	}
+	c->stereo = setting_bool("STEREO", true);
+	c->shared_fps = setting_float("SHARED_FPS", 30.0f);
+	c->shared_detect_min = setting_float("SHARED_DETECT_MIN", 0.3f);
+	if (!(c->shared_fps >= 0.0f && c->shared_fps <= 240.0f)) {
+		c->shared_fps = 30.0f;
+	}
 	setting("DEVICE", c->device, sizeof(c->device));
 	c->req.width = (uint32_t)setting_int("WIDTH", 1280, 64, 7680);
 	c->req.height = (uint32_t)setting_int("HEIGHT", 720, 48, 4320);
@@ -288,6 +347,8 @@ read_config(struct oth_config *c)
 	c->idle_s = (uint32_t)setting_int("IDLE_S", 5, 0, 86400);
 	c->permission_timeout_ms = (uint32_t)setting_int("PERMISSION_TIMEOUT_S", 120, 1, 3600) * 1000u;
 	c->stats_s = (uint32_t)setting_int("STATS_S", 0, 0, 3600);
+	c->log_frames = setting_bool("LOG_FRAMES", false);
+	setting("LOG_FILE", c->log_file, sizeof(c->log_file));
 }
 
 
@@ -299,10 +360,11 @@ read_config(struct oth_config *c)
 
 enum oth_state
 {
-	OTH_STATE_IDLE = 0,          //!< no app locates joints: no thread, no camera
-	OTH_STATE_STARTING,          //!< verifying models, creating sessions, waiting for the permission prompt
-	OTH_STATE_RUNNING,           //!< camera open, frames flowing
-	OTH_STATE_NO_CAMERA,         //!< no camera (or it went away): retrying
+	OTH_STATE_IDLE = 0,       //!< no app locates joints: no thread, no camera
+	OTH_STATE_STARTING,       //!< verifying models, creating sessions, waiting for the permission prompt
+	OTH_STATE_RUNNING,        //!< camera open, frames flowing
+	OTH_STATE_NO_CAMERA,      //!< no camera (or it went away): retrying
+	OTH_STATE_CAMERA_WAITING, //!< the shared camera is open but its display sends frames only during a 3D session
 	OTH_STATE_PERMISSION_DENIED, //!< the OS refused camera access
 	OTH_STATE_MODELS_MISSING,    //!< a model blob is missing or does not match the pack
 	OTH_STATE_FAILED,            //!< inference could not start on any execution provider
@@ -316,6 +378,7 @@ state_name(enum oth_state s)
 	case OTH_STATE_STARTING: return "starting";
 	case OTH_STATE_RUNNING: return "running";
 	case OTH_STATE_NO_CAMERA: return "no camera";
+	case OTH_STATE_CAMERA_WAITING: return "camera waiting";
 	case OTH_STATE_PERMISSION_DENIED: return "camera permission denied";
 	case OTH_STATE_MODELS_MISSING: return "models missing";
 	case OTH_STATE_FAILED: return "inference failed";
@@ -351,6 +414,12 @@ struct oth_hub
 	bool seen_open[2];     //!< the side was tracked open since it was last lost
 	bool pinch_held[2];    //!< the side is inside a deliberate pinch (one that started on an open hand)
 	uint64_t frames;       //!< analysed frames since the process started (diagnostics)
+	// Sources.
+	bool shared_refused;      //!< the runtime refused the shared camera for good (consent / not authorized)
+	int64_t shared_retry_ns;  //!< do not try the shared camera again before this
+	int32_t shared_last_code; //!< the last shared-camera failure logged (one line per new reason)
+	int64_t absent_retry_ns;  //!< ABSENT for a reason that may pass: offer PRESENT again from this time (0 = never)
+	bool webcam_at_probe;     //!< probe found a webcam
 };
 
 static ot_mutex g_hub_init_lock = OT_MUTEX_INITIALIZER;
@@ -415,11 +484,12 @@ set_state(enum oth_state s, const char *fmt, ...)
 	const bool changed = g_h.state != s || strcmp(g_h.detail, d) != 0;
 	g_h.state = s;
 	ot_copy_str(g_h.detail, sizeof(g_h.detail), d);
-	// Presence is "is there a camera to track with", never "is a hand in view".
+	// Presence is "is there a camera to track with", never "is a hand in view". On the shared camera it follows
+	// the stream (input-provider spec §4d.2): frames flowing = PRESENT, waiting / suspended / ended = ABSENT.
 	if (s == OTH_STATE_RUNNING) {
 		g_h.presence = XRT_INPUT_PROVIDER_PRESENCE_PRESENT;
-	} else if (s == OTH_STATE_NO_CAMERA || s == OTH_STATE_PERMISSION_DENIED || s == OTH_STATE_MODELS_MISSING ||
-	           s == OTH_STATE_FAILED) {
+	} else if (s == OTH_STATE_NO_CAMERA || s == OTH_STATE_CAMERA_WAITING || s == OTH_STATE_PERMISSION_DENIED ||
+	           s == OTH_STATE_MODELS_MISSING || s == OTH_STATE_FAILED) {
 		g_h.presence = XRT_INPUT_PROVIDER_PRESENCE_ABSENT;
 	}
 	ot_unlock(&g_h.lock);
@@ -650,6 +720,293 @@ stats_flush(struct oth_stats *st)
 	st->since_ns = ot_monotonic_ns();
 }
 
+/*
+ *
+ * Sources: the display's shared stereo camera, else a webcam.
+ *
+ */
+
+enum oth_src_kind
+{
+	OTH_SRC_NONE = 0,
+	OTH_SRC_WEBCAM,
+	OTH_SRC_SHARED,
+};
+
+struct oth_source
+{
+	enum oth_src_kind kind;
+	// Webcam.
+	struct ot_capture *cap;
+	struct ot_camera_info cam;
+	bool permission_checked;
+	// Shared stereo camera.
+	struct ot_shcam *sh;
+	struct ot_shcam_info sh_info;
+	bool stereo;                 //!< the pair has a baseline and STEREO=1
+	bool have_generation;        //!< calibration_generation below is the one opened with
+	uint32_t generation;         //!< calibration generation of the stream
+	int64_t opened_ns;           //!< when the shared stream opened (the "no frames yet" clock)
+	int64_t last_frame_ns;       //!< newest shared frame (arrival)
+	float eye_offset[3];         //!< camera frame: the left eye relative to the pair's centre (the pose's origin)
+	char key[OT_CAMERA_KEY_MAX]; //!< what get_camera_pose is asked about
+	char name[OT_CAMERA_NAME_MAX];
+};
+
+//! Retry pace for the shared camera while a webcam serves (switch back to the display's own camera).
+#define OTH_SHARED_RETRY_WITH_WEBCAM_NS (30LL * 1000000000LL)
+//! ...and while nothing serves (the provider's loop already waits 2 s between attempts).
+#define OTH_SHARED_RETRY_NS (2LL * 1000000000LL)
+//! ABSENT for a reason that may pass (no camera, a waiting / suspended stream): offer PRESENT again after this.
+#define OTH_ABSENT_RETRY_NS (30LL * 1000000000LL)
+//! No shared frame for this long: the stream's state decides presence.
+#define OTH_SHARED_STALE_NS (500LL * 1000000LL)
+
+static bool
+want_shared(const struct oth_config *c)
+{
+	return c->source != OTH_SOURCE_WEBCAM && ot_shcam_host_supports(g_host);
+}
+
+static void
+close_source(struct oth_source *s)
+{
+	if (s->kind == OTH_SRC_WEBCAM) {
+		ot_capture_close(s->cap);
+		s->cap = NULL;
+	} else if (s->kind == OTH_SRC_SHARED) {
+		ot_shcam_close(s->sh);
+		s->sh = NULL;
+	}
+	s->kind = OTH_SRC_NONE;
+}
+
+//! Note a failed shared open: when to try again, and one log line per new reason.
+static void
+shared_failed(xrt_result_t r, bool webcam_fallback)
+{
+	const int64_t now = ot_monotonic_ns();
+	ot_lock(&g_h.lock);
+	const bool new_reason = g_h.shared_last_code != (int32_t)r;
+	g_h.shared_last_code = (int32_t)r;
+	// Consent refused / not authorized: asking again would prompt again. Everything else may pass.
+	if (r == XRT_ERROR_STEREO_CAMERA_CONSENT_REFUSED || r == XRT_ERROR_NOT_AUTHORIZED) {
+		g_h.shared_refused = true;
+	}
+	g_h.shared_retry_ns = now + (webcam_fallback ? OTH_SHARED_RETRY_WITH_WEBCAM_NS : OTH_SHARED_RETRY_NS);
+	ot_unlock(&g_h.lock);
+	if (new_reason) {
+		log_line("shared stereo camera not opened: %s (%d)%s", ot_shcam_result_str(r), (int)r,
+		         webcam_fallback ? "; using a webcam" : "");
+	}
+}
+
+//! Try the display's shared camera. True when it opened.
+static bool
+open_shared(const struct oth_config *c, struct oth_source *s)
+{
+	const int64_t now = ot_monotonic_ns();
+	ot_lock(&g_h.lock);
+	const bool skip = g_h.shared_refused || now < g_h.shared_retry_ns;
+	ot_unlock(&g_h.lock);
+	if (skip || !want_shared(c)) {
+		return false;
+	}
+	struct ot_shcam *sh = NULL;
+	struct ot_shcam_info info;
+	const xrt_result_t r = ot_shcam_open(g_host, OTH_ID, c->shared_fps, &sh, &info);
+	if (r != XRT_SUCCESS) {
+		shared_failed(r, c->source == OTH_SOURCE_AUTO);
+		return false;
+	}
+	ot_lock(&g_h.lock);
+	g_h.shared_last_code = 0;
+	ot_unlock(&g_h.lock);
+	s->kind = OTH_SRC_SHARED;
+	s->sh = sh;
+	s->sh_info = info;
+	s->have_generation = false;
+	s->opened_ns = ot_monotonic_ns();
+	s->last_frame_ns = 0;
+	s->stereo = c->stereo && info.baseline_m > 0.0f && info.k.f > 0.0f;
+	// The camera pose names the pair (its centre); the frames are the LEFT eye's, which sits half a baseline
+	// toward the camera frame's +X (the image's left: the right eye is the image-right one, ADR-043).
+	s->eye_offset[0] = 0.5f * info.baseline_m;
+	s->eye_offset[1] = 0.0f;
+	s->eye_offset[2] = 0.0f;
+	ot_copy_str(s->key, sizeof(s->key), info.key);
+	ot_copy_str(s->name, sizeof(s->name), info.name);
+	log_line("shared stereo camera '%s' (%s): %ux%u per eye, %.0f Hz cap, f %.1f px, baseline %.1f mm%s%s",
+	         info.name, info.key, info.eye_width, info.eye_height, (double)info.max_frame_rate, (double)info.k.f,
+	         (double)info.baseline_m * 1000.0, s->stereo ? ", stereo hand scale on" : ", one eye only",
+	         info.frame_orientation_deg != 0 && info.frame_orientation_deg != 0xFFFFFFFFu
+	             ? " (frames are rotated: the hands are tracked as delivered)"
+	             : "");
+	return true;
+}
+
+/*!
+ * Try a webcam. True when it opened. @p fatal: the OS camera permission is refused (and no other source can
+ * serve), so the worker gives up instead of retrying.
+ */
+static bool
+open_webcam(const struct oth_config *c, struct oth_source *s, char *err, size_t err_size, bool *fatal)
+{
+	*fatal = false;
+	if (c->source == OTH_SOURCE_SHARED) {
+		snprintf(err, err_size, "SOURCE=shared: waiting for the display's shared camera");
+		return false;
+	}
+	if (!ot_capture_resolve(c->device, &s->cam)) {
+		snprintf(err, err_size, "no camera matches DEVICE='%s'", c->device);
+		return false;
+	}
+	if (strncmp(s->cam.key, "file:", 5) != 0 && !s->permission_checked) {
+		enum ot_camera_auth auth = ot_capture_authorization();
+		if (auth == OT_CAMERA_NOT_DETERMINED) {
+			set_state(OTH_STATE_STARTING, "waiting for the camera permission prompt");
+			auth = ot_capture_request_access(c->permission_timeout_ms, &g_h.stop);
+		}
+		if (auth != OT_CAMERA_AUTHORIZED) {
+			snprintf(
+			    err, err_size, "%s",
+			    auth == OT_CAMERA_RESTRICTED
+			        ? "a policy restricts camera access"
+			        : "allow it in System Settings > Privacy & Security > Camera, then restart the app");
+			*fatal = !want_shared(c);
+			return false;
+		}
+		s->permission_checked = true;
+	}
+	if (!ot_capture_open(&s->cam, &c->req, &s->cap, err, err_size)) {
+		return false;
+	}
+	s->kind = OTH_SRC_WEBCAM;
+	s->stereo = false;
+	memset(s->eye_offset, 0, sizeof(s->eye_offset));
+	ot_copy_str(s->key, sizeof(s->key), s->cam.key);
+	ot_copy_str(s->name, sizeof(s->name), s->cam.name);
+	return true;
+}
+
+//! The pose the hands are mapped with: the runtime's answer, moved to the eye the frames come from.
+static void
+effective_pose(const struct oth_source *s, const struct ot_cam_pose *pose, struct ot_cam_pose *out)
+{
+	*out = *pose;
+	if (s->kind == OTH_SRC_SHARED) {
+		float d[3];
+		ot_quat_rotate(pose->q, s->eye_offset, d);
+		out->t[0] += d[0];
+		out->t[1] += d[1];
+		out->t[2] += d[2];
+		// The display's rectified calibration is the focal length; a webcam calibration's scale does not apply.
+		out->focal_scale = 1.0f;
+	}
+}
+
+/*!
+ * A source just opened: its pinhole, its pose, a fresh tracker state. The webcam's pinhole comes from HFOV_DEG;
+ * the shared camera's from its rectified calibration (HFOV_DEG only when it carries none).
+ */
+static void
+adopt_source(const struct oth_config *c,
+             struct oth_source *src,
+             struct ot_intrinsics *k,
+             struct ot_cam_pose *pose_raw,
+             struct ot_cam_pose *pose,
+             struct ot_hand_tracker *tracker,
+             struct ot_hands *hands)
+{
+	if (src->kind == OTH_SRC_WEBCAM) {
+		uint32_t w, h;
+		float fps;
+		ot_capture_mode(src->cap, &w, &h, &fps);
+		(void)ot_intrinsics_from_hfov(w, h, c->hfov_deg, k);
+		set_state(OTH_STATE_RUNNING, "%s, %ux%u @ %.0f fps, HFOV %.0f deg (f = %.0f px)", src->name, w, h,
+		          (double)fps, (double)c->hfov_deg, (double)k->f);
+	} else {
+		*k = src->sh_info.k;
+		if (!(k->f > 0.0f)) {
+			(void)ot_intrinsics_from_hfov(src->sh_info.eye_width, src->sh_info.eye_height, c->hfov_deg, k);
+			log_line("the shared camera carries no calibration: HFOV_DEG %.0f, one eye only",
+			         (double)c->hfov_deg);
+		}
+		set_state(OTH_STATE_STARTING, "shared camera open, waiting for its first frame");
+	}
+	ot_lock(&g_h.lock);
+	ot_copy_str(g_h.camera_name, sizeof(g_h.camera_name), src->name);
+	ot_copy_str(g_h.camera_key, sizeof(g_h.camera_key), src->key);
+	ot_unlock(&g_h.lock);
+	memset(pose_raw, 0, sizeof(*pose_raw));
+	read_pose(src->key, pose_raw, true);
+	effective_pose(src, pose_raw, pose);
+	// The palm detector loses hands on grey frames that the landmark model then holds: detect lower there, and
+	// let the landmark presence (PRESENCE_MIN) confirm.
+	ot_hand_tracker_set_detect_min(tracker, src->kind == OTH_SRC_SHARED ? c->shared_detect_min
+	                                                                    : c->tracker.detect_min_score);
+	ot_hand_tracker_reset(tracker);
+	ot_hands_reset(hands);
+}
+
+/*!
+ * LOG_FRAMES=1: one line per analysed frame, the raw data of a camera-coverage test. Per observed hand: where it
+ * is in the image (the middle knuckle, normalised 0..1, origin top-left of the frame the models saw) and its box,
+ * flagged "edge" when it touches the border (the hand leaves the view there). Per side: whether it was published
+ * and where, in display space.
+ */
+static void
+log_frame(const struct oth_source *src,
+          const struct ot_image *img,
+          const struct ot_hand_result *res,
+          const struct ot_hand_state out[2],
+          int64_t capture_ns,
+          int64_t lat_ns)
+{
+	static uint64_t index = 0; // the worker thread only
+	const float w = (float)(img->width > 0 ? img->width : 1), h = (float)(img->height > 0 ? img->height : 1);
+	char buf[1024];
+	size_t n =
+	    (size_t)snprintf(buf, sizeof(buf), "frame %llu t %.3f s %s: %s, %u hand(s)", (unsigned long long)++index,
+	                     (double)capture_ns * 1e-9, src->kind == OTH_SRC_SHARED ? "shared" : "webcam",
+	                     res->detected ? "detector ran" : "followed", res->count);
+	if (res->detected && n < sizeof(buf)) {
+		n += (size_t)snprintf(buf + n, sizeof(buf) - n, " (palms %u, best score %.2f)", res->palms,
+		                      (double)res->best_raw_score);
+	}
+	for (uint32_t i = 0; i < res->count && n < sizeof(buf); i++) {
+		const struct ot_hand_obs *o = &res->hands[i];
+		float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+		for (int j = 0; j < OT_HAND_LM_COUNT; j++) {
+			x0 = o->lm[j][0] < x0 ? o->lm[j][0] : x0;
+			y0 = o->lm[j][1] < y0 ? o->lm[j][1] : y0;
+			x1 = o->lm[j][0] > x1 ? o->lm[j][0] : x1;
+			y1 = o->lm[j][1] > y1 ? o->lm[j][1] : y1;
+		}
+		const bool edge = x0 < 0.02f * w || y0 < 0.02f * h || x1 > 0.98f * w || y1 > 0.98f * h;
+		n += (size_t)snprintf(buf + n, sizeof(buf) - n,
+		                      " | hand %u: P(right) %.2f, presence %.2f, knuckle (%.2f, %.2f), box %.2f-%.2f x "
+		                      "%.2f-%.2f%s",
+		                      o->track_id, (double)o->right_mean, (double)o->presence,
+		                      (double)(o->lm[OT_HL_MIDDLE_MCP][0] / w),
+		                      (double)(o->lm[OT_HL_MIDDLE_MCP][1] / h), (double)(x0 / w), (double)(x1 / w),
+		                      (double)(y0 / h), (double)(y1 / h), edge ? " edge" : "");
+	}
+	for (int s = 0; s < 2 && n < sizeof(buf); s++) {
+		if (out[s].active) {
+			n += (size_t)snprintf(
+			    buf + n, sizeof(buf) - n, " | %s: palm (%.3f, %.3f, %.3f) m, %.0f mm from the camera",
+			    s == OT_SIDE_LEFT ? "left" : "right", (double)out[s].joints.pos[OT_HJ_PALM][0],
+			    (double)out[s].joints.pos[OT_HJ_PALM][1], (double)out[s].joints.pos[OT_HJ_PALM][2],
+			    (double)out[s].depth_m * 1000.0);
+		}
+	}
+	if (n < sizeof(buf)) {
+		(void)snprintf(buf + n, sizeof(buf) - n, " | %.0f ms capture -> publish", (double)lat_ns * 1e-6);
+	}
+	log_line("%s", buf);
+}
+
 static void
 worker(void *arg)
 {
@@ -660,16 +1017,18 @@ worker(void *arg)
 	c = g_h.cfg;
 	ot_unlock(&g_h.lock);
 	struct ot_hand_tracker *tracker = NULL;
-	struct ot_capture *cap = NULL;
+	struct oth_source src;
+	memset(&src, 0, sizeof(src));
 	struct ot_frame_buffer fb;
 	memset(&fb, 0, sizeof(fb));
 	char err[512];
 	bool failed = true;
-	struct ot_cam_pose pose;
+	struct ot_cam_pose pose_raw, pose;
+	memset(&pose_raw, 0, sizeof(pose_raw));
 	memset(&pose, 0, sizeof(pose));
 	struct ot_intrinsics k;
 	memset(&k, 0, sizeof(k));
-	// Background hands never take a track (ot_hands_admit reads k and pose as they change).
+	// Background hands never take a track (ot_hands_admit reads k, the hand-size factor and pose as they change).
 	struct ot_hands_admit admit = {.k = &k, .p = &c.hands, .pose = &pose, .last_rejected_m = 0.0f};
 	c.tracker.admit = ot_hands_admit;
 	c.tracker.admit_user = &admit;
@@ -688,81 +1047,136 @@ worker(void *arg)
 		set_state(OTH_STATE_FAILED, "no execution provider could run the models");
 		goto done;
 	}
-	if (strncmp(c.device, "file:", 5) != 0) {
-		enum ot_camera_auth auth = ot_capture_authorization();
-		if (auth == OT_CAMERA_NOT_DETERMINED) {
-			set_state(OTH_STATE_STARTING, "waiting for the camera permission prompt");
-			auth = ot_capture_request_access(c.permission_timeout_ms, &g_h.stop);
-		}
-		if (auth != OT_CAMERA_AUTHORIZED) {
-			set_state(
-			    OTH_STATE_PERMISSION_DENIED,
-			    auth == OT_CAMERA_RESTRICTED
-			        ? "a policy restricts camera access"
-			        : "allow it in System Settings > Privacy & Security > Camera, then restart the app");
-			goto done;
-		}
-	}
 	failed = false;
 
-	struct ot_camera_info cam;
-	memset(&cam, 0, sizeof(cam));
 	struct ot_hands hands;
 	ot_hands_reset(&hands);
+	const float user_scale = c.hands.hand_scale;
 	int64_t last_pose_read = 0;
 	bool first_reject = true;
 	bool first_hand = true;
 	uint32_t logged_track[2] = {0, 0};
+	uint32_t stereo_frames = 0, stereo_points = 0;
 	struct oth_stats stats;
 	memset(&stats, 0, sizeof(stats));
 	stats.since_ns = ot_monotonic_ns();
 
 	while (!stop_or_idle(&c)) {
-		if (cap == NULL) {
-			if (!ot_capture_resolve(c.device, &cam)) {
-				set_state(OTH_STATE_NO_CAMERA, "no camera matches DEVICE='%s'", c.device);
-				if (wait_or_stop(&c, 2000)) {
+		if (src.kind == OTH_SRC_NONE) {
+			bool fatal = false;
+			if (!open_shared(&c, &src) && !open_webcam(&c, &src, err, sizeof(err), &fatal)) {
+				if (fatal) {
+					set_state(OTH_STATE_PERMISSION_DENIED, "%s", err);
+					failed = true;
 					break;
 				}
-				continue;
-			}
-			if (!ot_capture_open(&cam, &c.req, &cap, err, sizeof(err))) {
 				set_state(OTH_STATE_NO_CAMERA, "%s", err);
 				if (wait_or_stop(&c, 2000)) {
 					break;
 				}
 				continue;
 			}
-			uint32_t w, h;
-			float fps;
-			ot_capture_mode(cap, &w, &h, &fps);
-			(void)ot_intrinsics_from_hfov(w, h, c.hfov_deg, &k);
-			ot_lock(&g_h.lock);
-			ot_copy_str(g_h.camera_name, sizeof(g_h.camera_name), cam.name);
-			ot_copy_str(g_h.camera_key, sizeof(g_h.camera_key), cam.key);
-			ot_unlock(&g_h.lock);
-			read_pose(cam.key, &pose, true);
+			adopt_source(&c, &src, &k, &pose_raw, &pose, tracker, &hands);
 			last_pose_read = ot_monotonic_ns();
-			ot_hand_tracker_reset(tracker);
-			ot_hands_reset(&hands);
-			set_state(OTH_STATE_RUNNING, "%s, %ux%u @ %.0f fps, HFOV %.0f deg (f = %.0f px)", cam.name, w,
-			          h, (double)fps, (double)c.hfov_deg, (double)k.f);
-		}
-		if (!ot_capture_take(cap, &fb, 500)) {
-			if (ot_capture_lost(cap)) {
-				ot_capture_close(cap);
-				cap = NULL;
-				set_state(OTH_STATE_NO_CAMERA, "the camera went away");
+		} else if (src.kind == OTH_SRC_WEBCAM && c.source == OTH_SOURCE_AUTO) {
+			// A webcam serves while the display's own camera could not be opened: switch when it can.
+			struct oth_source sh;
+			memset(&sh, 0, sizeof(sh));
+			if (open_shared(&c, &sh)) {
+				log_line("switching from the webcam to the display's shared camera");
+				close_source(&src);
+				src = sh;
+				adopt_source(&c, &src, &k, &pose_raw, &pose, tracker, &hands);
+				last_pose_read = ot_monotonic_ns();
 			}
-			continue;
 		}
-		fb.frame.image.mirrored = c.mirror;
-		if (fb.frame.image.width != k.width || fb.frame.image.height != k.height) {
-			(void)ot_intrinsics_from_hfov(fb.frame.image.width, fb.frame.image.height, c.hfov_deg, &k);
+
+		// One frame.
+		struct ot_image img;
+		struct ot_shcam_frame sf;
+		memset(&img, 0, sizeof(img));
+		memset(&sf, 0, sizeof(sf));
+		bool have_pair = false;
+		int64_t capture_ns = 0;
+		if (src.kind == OTH_SRC_WEBCAM) {
+			if (!ot_capture_take(src.cap, &fb, 500)) {
+				if (ot_capture_lost(src.cap)) {
+					close_source(&src);
+					set_state(OTH_STATE_NO_CAMERA, "the camera went away");
+				}
+				continue;
+			}
+			fb.frame.image.mirrored = c.mirror;
+			if (fb.frame.image.width != k.width || fb.frame.image.height != k.height) {
+				(void)ot_intrinsics_from_hfov(fb.frame.image.width, fb.frame.image.height, c.hfov_deg,
+				                              &k);
+			}
+			img = fb.frame.image;
+			capture_ns = fb.frame.capture_ns;
+		} else {
+			uint32_t cam_state = 0;
+			const enum ot_shcam_take t = ot_shcam_take(src.sh, 100, &sf, &cam_state);
+			const int64_t now = ot_monotonic_ns();
+			if (t == OT_SHCAM_ENDED) {
+				close_source(&src);
+				shared_failed(XRT_ERROR_STEREO_CAMERA_STREAM_ENDED, c.source == OTH_SOURCE_AUTO);
+				set_state(OTH_STATE_NO_CAMERA, "the shared camera's stream ended");
+				continue;
+			}
+			if (t == OT_SHCAM_TIMEOUT) {
+				const int64_t since =
+				    now - (src.last_frame_ns != 0 ? src.last_frame_ns : src.opened_ns);
+				if (since > OTH_SHARED_STALE_NS) {
+					if (cam_state == XRT_STEREO_CAMERA_STATE_WAITING ||
+					    cam_state == XRT_STEREO_CAMERA_STATE_AVAILABLE) {
+						// Open and silent: the display delivers frames only while a 3D session
+						// holds its tracker.
+						set_state(
+						    OTH_STATE_CAMERA_WAITING,
+						    "the display sends its camera's frames only during a 3D session");
+					} else if (cam_state == XRT_STEREO_CAMERA_STATE_SUSPENDED) {
+						set_state(OTH_STATE_NO_CAMERA,
+						          "the shared camera is suspended (session locked, sharing off "
+						          "or frames stopped)");
+					} else {
+						set_state(OTH_STATE_NO_CAMERA, "the shared camera is unavailable");
+					}
+				}
+				continue;
+			}
+			if (src.have_generation && sf.calibration_generation != src.generation) {
+				// The rectified calibration moved: close and reopen to read it (spec §4d.2).
+				log_line("the shared camera's calibration changed: reopening");
+				close_source(&src);
+				continue;
+			}
+			src.have_generation = true;
+			src.generation = sf.calibration_generation;
+			set_state(OTH_STATE_RUNNING, "%s (shared), %ux%u per eye, f = %.0f px, baseline %.1f mm",
+			          src.name, sf.left.width, sf.left.height, (double)k.f,
+			          (double)src.sh_info.baseline_m * 1000.0);
+			src.last_frame_ns = now;
+			if (sf.left.width != k.width || sf.left.height != k.height) {
+				// Frames of another size than the stream opened with: scale the pinhole with them.
+				const float sx = (float)sf.left.width / (float)(k.width > 0 ? k.width : 1);
+				const float sy = (float)sf.left.height / (float)(k.height > 0 ? k.height : 1);
+				k.f *= sx;
+				k.cx *= sx;
+				k.cy *= sy;
+				k.width = sf.left.width;
+				k.height = sf.left.height;
+			}
+			img = sf.left;
+			have_pair = src.stereo;
+			capture_ns = sf.capture_ns;
 		}
+
 		struct ot_hand_result res;
 		const int64_t proc0 = ot_monotonic_ns();
-		if (!ot_hand_tracker_process(tracker, &fb.frame.image, &res, err, sizeof(err))) {
+		if (!ot_hand_tracker_process(tracker, &img, &res, err, sizeof(err))) {
+			if (src.kind == OTH_SRC_SHARED) {
+				ot_shcam_release(src.sh, &sf);
+			}
 			log_line("inference failed (%s): recreating the sessions on the CPU", err);
 			ot_hand_tracker_destroy(tracker);
 			tracker = NULL;
@@ -775,16 +1189,35 @@ worker(void *arg)
 		}
 		const int64_t now = ot_monotonic_ns();
 		if (now - last_pose_read > 2000000000LL) {
-			read_pose(cam.key, &pose, true); // follows a new calibration without a restart
+			read_pose(src.key, &pose_raw, true); // follows a new calibration without a restart
+			effective_pose(&src, &pose_raw, &pose);
 			last_pose_read = now;
 		}
+		// The pair measures the hand-size factor: stereo depth / placed depth on each hand's palm.
+		if (have_pair) {
+			for (uint32_t i = 0; i < res.count; i++) {
+				float cam[OT_HAND_LM_COUNT][3], depth, ratio;
+				uint32_t n = 0;
+				if (ot_hands_place_camera(&k, &c.hands, &pose, &res.hands[i], cam, &depth) &&
+				    ot_stereo_hand_ratio(&sf.left, &sf.right, k.f, src.sh_info.baseline_m,
+				                         (const float(*)[3])res.hands[i].lm, (const float(*)[3])cam,
+				                         &ratio, &n)) {
+					c.hands.hand_scale = ot_stereo_scale_update(c.hands.hand_scale, ratio, 0.1f);
+					stereo_frames++;
+					stereo_points += n;
+				}
+			}
+		}
+		if (src.kind == OTH_SRC_SHARED) {
+			ot_shcam_release(src.sh, &sf);
+		}
 		struct ot_hand_state out[2];
-		ot_hands_update(&hands, &k, &c.hands, &pose, &res, fb.frame.capture_ns, out);
+		ot_hands_update(&hands, &k, &c.hands, &pose, &res, capture_ns, out);
 		publish(out);
-		const int64_t lat = ot_monotonic_ns() - fb.frame.capture_ns;
+		const int64_t lat = ot_monotonic_ns() - capture_ns;
 		if (c.stats_s > 0) {
 			// Diagnostics, once per track: the model's handedness against the 3D shape's
-			// (ot_hand_chirality).
+			// (ot_hand_chirality), and where the hand sits in the image (is it inside the camera's view?).
 			for (int s = 0; s < 2; s++) {
 				if (out[s].active && out[s].track_id != logged_track[s]) {
 					logged_track[s] = out[s].track_id;
@@ -812,6 +1245,9 @@ worker(void *arg)
 			    out[0].active ? "left" : "right", (double)s->joints.pos[OT_HJ_PALM][0],
 			    (double)s->joints.pos[OT_HJ_PALM][1], (double)s->joints.pos[OT_HJ_PALM][2],
 			    (double)s->depth_m * 1000.0, (double)lat * 1e-6);
+		}
+		if (c.log_frames) {
+			log_frame(&src, &img, &res, out, capture_ns, lat);
 		}
 		stats.frames++;
 		stats.hands += res.count;
@@ -841,6 +1277,16 @@ worker(void *arg)
 		stats.proc_ms += (double)(ot_monotonic_ns() - proc0) * 1e-6;
 		stats.lat_ms += (double)lat * 1e-6;
 		if (c.stats_s > 0 && ot_monotonic_ns() - stats.since_ns >= (int64_t)c.stats_s * 1000000000LL) {
+			if (src.kind == OTH_SRC_SHARED) {
+				log_line(
+				    "stats stereo: hand-size factor %.3f (HAND_SCALE %.2f), %u measured hands, %.1f "
+				    "palm points "
+				    "each",
+				    (double)c.hands.hand_scale, (double)user_scale, stereo_frames,
+				    stereo_frames > 0 ? (double)stereo_points / stereo_frames : 0.0);
+				stereo_frames = 0;
+				stereo_points = 0;
+			}
 			stats_flush(&stats);
 		}
 	}
@@ -852,13 +1298,17 @@ worker(void *arg)
 	}
 
 done:
-	ot_capture_close(cap);
+	close_source(&src);
 	ot_frame_buffer_free(&fb);
 	ot_hand_tracker_destroy(tracker);
 	ot_lock(&g_h.lock);
 	g_h.thread_done = true;
 	if (failed) {
 		g_h.retry_after_ns = ot_monotonic_ns() + OTH_RETRY_NS;
+	} else if (g_h.presence == XRT_INPUT_PROVIDER_PRESENCE_ABSENT) {
+		// Ended without a camera (none yet, a stream waiting for a 3D session, suspended): nobody locates an
+		// ABSENT provider's joints, so nothing would start this thread again. Offer PRESENT again later.
+		g_h.absent_retry_ns = ot_monotonic_ns() + OTH_ABSENT_RETRY_NS;
 	}
 	ot_unlock(&g_h.lock);
 }
@@ -1403,35 +1853,61 @@ oth_probe(struct xrt_input_plugin_instance **out_inst)
 		log_line("declined: %s", err);
 		return XRT_ERROR_PROBER_NOT_SUPPORTED;
 	}
-	struct ot_camera_info cam;
-	if (!ot_capture_resolve(c.device, &cam)) {
-#if defined(__APPLE__)
-		log_line("declined: no camera%s%s%s", c.device[0] != '\0' ? " matches DEVICE='" : "", c.device,
-		         c.device[0] != '\0' ? "'" : "");
-#else
-		log_line("declined: no camera backend on this OS yet (only DEVICE=file:<ppm> for tests)");
-#endif
-		return XRT_ERROR_PROBER_NOT_SUPPORTED;
-	}
-	if (strncmp(cam.key, "file:", 5) != 0) {
-		const enum ot_camera_auth a = ot_capture_authorization();
-		if (a == OT_CAMERA_DENIED || a == OT_CAMERA_RESTRICTED) {
-			log_line(
-			    "declined: camera permission %s for this process (System Settings > Privacy & Security > "
-			    "Camera)",
-			    a == OT_CAMERA_DENIED ? "denied" : "restricted by policy");
-			return XRT_ERROR_PROBER_NOT_SUPPORTED;
+	if (c.log_file[0] != '\0' && g_log_fp == NULL) {
+		g_log_fp = fopen(c.log_file, "a");
+		if (g_log_fp == NULL) {
+			log_line("LOG_FILE '%s' cannot be opened: logging to stderr only", c.log_file);
 		}
+	}
+	// Sources, without opening any: the display's shared camera when the runtime offers the slots (whether
+	// it opens is known only on demand), and a webcam that enumerates and is not refused by the OS.
+	const bool shared = want_shared(&c);
+	struct ot_camera_info cam;
+	memset(&cam, 0, sizeof(cam));
+	bool webcam = false;
+	const char *webcam_why = "SOURCE=shared";
+	if (c.source != OTH_SOURCE_SHARED) {
+		webcam = ot_capture_resolve(c.device, &cam);
+#if defined(__APPLE__)
+		webcam_why = c.device[0] != '\0' ? "no camera matches DEVICE" : "no camera";
+#else
+		webcam_why = "no webcam backend on this OS yet (only DEVICE=file:<ppm> for tests)";
+#endif
+		if (webcam && strncmp(cam.key, "file:", 5) != 0) {
+			const enum ot_camera_auth a = ot_capture_authorization();
+			if (a == OT_CAMERA_DENIED || a == OT_CAMERA_RESTRICTED) {
+				webcam = false;
+				webcam_why = a == OT_CAMERA_DENIED ? "camera permission denied for this process "
+				                                     "(System Settings > Privacy & Security > Camera)"
+				                                   : "camera permission restricted by policy";
+			}
+		}
+	}
+	if (!shared && !webcam) {
+		log_line("declined: %s; %s", webcam_why,
+		         c.source == OTH_SOURCE_WEBCAM ? "SOURCE=webcam"
+		                                       : "the runtime offers no shared camera (older runtime)");
+		return XRT_ERROR_PROBER_NOT_SUPPORTED;
 	}
 	ot_lock(&g_h.lock);
 	g_h.cfg = c;
 	g_h.probed = true;
+	g_h.webcam_at_probe = webcam;
 	g_h.presence = XRT_INPUT_PROVIDER_PRESENCE_PRESENT;
-	ot_copy_str(g_h.camera_name, sizeof(g_h.camera_name), cam.name);
-	ot_copy_str(g_h.camera_key, sizeof(g_h.camera_key), cam.key);
+	ot_copy_str(g_h.camera_name, sizeof(g_h.camera_name), webcam ? cam.name : "shared stereo camera");
+	ot_copy_str(g_h.camera_key, sizeof(g_h.camera_key), webcam ? cam.key : "");
 	ot_unlock(&g_h.lock);
-	log_line("probe: usable — camera '%s' (%s); %s", cam.name, cam.key,
-	         c.controllers ? "hands + controllers" : "hand joints only");
+	if (shared && webcam) {
+		log_line(
+		    "probe: usable — the display's shared camera when the runtime opens it, else camera '%s' (%s); %s",
+		    cam.name, cam.key, c.controllers ? "hands + controllers" : "hand joints only");
+	} else if (shared) {
+		log_line("probe: usable — the display's shared camera, opened on demand (%s); %s", webcam_why,
+		         c.controllers ? "hands + controllers" : "hand joints only");
+	} else {
+		log_line("probe: usable — camera '%s' (%s); %s", cam.name, cam.key,
+		         c.controllers ? "hands + controllers" : "hand joints only");
+	}
 	return XRT_SUCCESS;
 }
 
@@ -1473,6 +1949,13 @@ oth_get_presence(struct xrt_input_plugin_instance *inst)
 		return XRT_INPUT_PROVIDER_PRESENCE_UNKNOWN;
 	}
 	ot_lock(&g_h.lock);
+	// ABSENT for a reason that may have passed (no camera yet, a stream that waited for a 3D session), and no
+	// thread to find out: offer PRESENT again, so an app's next locate starts the thread and tries the camera.
+	if (g_h.presence == XRT_INPUT_PROVIDER_PRESENCE_ABSENT && g_h.absent_retry_ns != 0 &&
+	    !(g_h.thread_running && !g_h.thread_done) && ot_monotonic_ns() >= g_h.absent_retry_ns) {
+		g_h.absent_retry_ns = 0;
+		g_h.presence = XRT_INPUT_PROVIDER_PRESENCE_PRESENT;
+	}
 	const enum xrt_input_provider_presence p = g_h.presence;
 	ot_unlock(&g_h.lock);
 	return p;

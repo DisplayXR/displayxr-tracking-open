@@ -102,14 +102,13 @@ ot_cam_to_display(const struct ot_cam_pose *pose, const float p[3], float out[3]
 	out[2] = pose->t[2] + r[2];
 }
 
-//! The 21 points of one observed hand in the camera frame. False when it cannot be placed.
-static bool
-place_camera(const struct ot_intrinsics *k,
-             const struct ot_hands_params *p,
-             const struct ot_cam_pose *pose,
-             const struct ot_hand_obs *o,
-             float (*cam)[3],
-             float *depth_m)
+bool
+ot_hands_place_camera(const struct ot_intrinsics *k,
+                      const struct ot_hands_params *p,
+                      const struct ot_cam_pose *pose,
+                      const struct ot_hand_obs *o,
+                      float (*cam)[3],
+                      float *depth_m)
 {
 	struct ot_intrinsics kk = *k;
 	kk.f *= pose->focal_scale > 0.0f ? pose->focal_scale : 1.0f;
@@ -139,7 +138,7 @@ place(const struct ot_intrinsics *k,
       float *depth_m)
 {
 	float cam[OT_HAND_LM_COUNT][3];
-	if (!place_camera(k, p, pose, o, cam, depth_m)) {
+	if (!ot_hands_place_camera(k, p, pose, o, cam, depth_m)) {
 		return false;
 	}
 	for (int i = 0; i < OT_HAND_LM_COUNT; i++) {
@@ -156,7 +155,7 @@ ot_hands_distance(const struct ot_intrinsics *k,
                   float *out_m)
 {
 	float cam[OT_HAND_LM_COUNT][3];
-	return place_camera(k, p, pose, o, cam, out_m);
+	return ot_hands_place_camera(k, p, pose, o, cam, out_m);
 }
 
 bool

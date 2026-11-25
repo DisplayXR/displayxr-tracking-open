@@ -62,6 +62,8 @@ fetch(const struct ot_image *img, int x, int y, float rgb[3])
 		rgb[0] = p[2];
 		rgb[1] = p[1];
 		rgb[2] = p[0];
+	} else if (img->format == OT_FMT_GRAY8) {
+		rgb[0] = rgb[1] = rgb[2] = p[x];
 	} else {
 		p += (size_t)x * 3u;
 		rgb[0] = p[0];
