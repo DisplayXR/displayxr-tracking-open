@@ -560,7 +560,7 @@ worker(void *arg)
 			set_state(OT_STATE_PERMISSION_DENIED,
 			          auth == OT_CAMERA_RESTRICTED
 			              ? "a policy restricts camera access"
-			              : "allow it in System Settings > Privacy & Security > Camera, then restart the app");
+			              : "allow it in " OT_CAMERA_PERMISSION_WHERE ", then restart the app");
 			ot_face_tracker_destroy(tracker);
 			return;
 		}
@@ -721,7 +721,7 @@ ot_probe(struct xrt_tracking_plugin_instance **out_inst)
 	}
 	struct ot_camera_info cam;
 	if (!ot_capture_resolve(c.device, &cam)) {
-#if defined(__APPLE__)
+#if OT_HAVE_CAMERA_BACKEND
 		log_line("declined: no camera%s%s%s", c.device[0] != '\0' ? " matches DEVICE='" : "", c.device,
 		         c.device[0] != '\0' ? "'" : "");
 #else
@@ -732,8 +732,7 @@ ot_probe(struct xrt_tracking_plugin_instance **out_inst)
 	if (strncmp(cam.key, "file:", 5) != 0) {
 		const enum ot_camera_auth a = ot_capture_authorization();
 		if (a == OT_CAMERA_DENIED || a == OT_CAMERA_RESTRICTED) {
-			log_line("declined: camera permission %s for this process (System Settings > Privacy & Security > "
-			         "Camera)",
+			log_line("declined: camera permission %s for this process (" OT_CAMERA_PERMISSION_WHERE ")",
 			         a == OT_CAMERA_DENIED ? "denied" : "restricted by policy");
 			return XRT_ERROR_PROBER_NOT_SUPPORTED;
 		}

@@ -17,6 +17,10 @@ cmake_minimum_required(VERSION 3.22)
 project(displayxr_tracking_open VERSION 0.1.0 LANGUAGES C)
 if(APPLE)
 	enable_language(OBJC)
+elseif(WIN32)
+	enable_language(CXX) # the Media Foundation capture (COM)
+	set(CMAKE_CXX_STANDARD 17)
+	set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
 # The runtime commit the vendored include/xrt/ headers were copied from (README "The ABI it builds
@@ -66,6 +70,7 @@ set(OPENTRACK_CORE_SOURCES
 	src/ot_hand_geom.c
 	src/ot_hand_pose.c
 	src/ot_hands.c
+	src/ot_camera_refusal.c
 	src/ot_json.c
 	src/ot_pack.c
 	src/ot_platform.c
@@ -73,10 +78,12 @@ set(OPENTRACK_CORE_SOURCES
 	src/ot_stereo.c
 	src/ot_viewer.c)
 
-# Capture: AVFoundation on macOS; Windows (Media Foundation) and Linux (V4L2) are follow-ups.
+# Capture: AVFoundation on macOS, Media Foundation on Windows; Linux (V4L2) is a follow-up.
 set(OPENTRACK_CAPTURE_SOURCES src/ot_capture_common.c src/ot_capture_file.c)
 if(APPLE)
 	list(APPEND OPENTRACK_CAPTURE_SOURCES src/ot_capture_avf.m)
+elseif(WIN32)
+	list(APPEND OPENTRACK_CAPTURE_SOURCES src/ot_capture_mf.cpp)
 else()
 	list(APPEND OPENTRACK_CAPTURE_SOURCES src/ot_capture_stub.c)
 endif()
@@ -105,12 +112,17 @@ if(APPLE)
 		"-framework CoreMedia" "-framework CoreVideo")
 endif()
 if(WIN32)
-	target_link_libraries(${OPENTRACK_PROVIDER} PRIVATE shell32 ole32 uuid)
+	target_link_libraries(${OPENTRACK_PROVIDER} PRIVATE shell32 ole32 uuid advapi32 mfplat mf mfreadwrite mfuuid)
 else()
 	find_package(Threads REQUIRED)
 	target_link_libraries(${OPENTRACK_PROVIDER} PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
 endif()
 if(MSVC)
+	# Media Foundation is delay-loaded: Windows "N" editions ship without it, and the provider must still
+	# load there (the capture then finds no camera; ot_capture_mf.cpp checks the DLLs before any call).
+	target_link_options(${OPENTRACK_PROVIDER} PRIVATE /DELAYLOAD:mfplat.dll /DELAYLOAD:mfreadwrite.dll
+		/DELAYLOAD:mf.dll)
+	target_link_libraries(${OPENTRACK_PROVIDER} PRIVATE delayimp)
 	# A provider DLL loads into a process whose CRT it does not control.
 	set_property(TARGET ${OPENTRACK_PROVIDER} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
@@ -180,7 +192,7 @@ if(OPENTRACK_BUILD_TESTS)
 	endif()
 	opentrack_warnings(open-tracking-unit-tests)
 
-	foreach(_case one-euro pixel-dir distance roi decode viewer)
+	foreach(_case one-euro pixel-dir distance roi decode viewer camera-refusal)
 		add_test(NAME unit-${_case} COMMAND open-tracking-unit-tests ${_case})
 	endforeach()
 	add_test(NAME unit-pack COMMAND open-tracking-unit-tests pack ${OPENTRACK_PACK})

@@ -10,6 +10,7 @@
  *     open-tracking-unit-tests <case> [pack.json]
  */
 
+#include "ot_camera_refusal.h"
 #include "ot_eyes.h"
 #include "ot_face_geom.h"
 #include "ot_landmarks.h"
@@ -487,6 +488,25 @@ test_viewer(void)
 	      "  last known eyes, not tracking");
 }
 
+static void
+test_camera_refusal(void)
+{
+	uint16_t vid = 0, pid = 0;
+	check(ot_parse_vid_pid("\\\\?\\usb#vid_046D&pid_085e&mi_00#7&1a2b&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\\global",
+	                       &vid, &pid) &&
+	          vid == 0x046d && pid == 0x085e,
+	      "VID:PID from a Windows symbolic link (%04x:%04x)", vid, pid);
+	check(!ot_parse_vid_pid("0x1420000005ac8514", &vid, &pid), "no VID:PID in an id without vid_ / pid_");
+	check(!ot_parse_vid_pid("usb#vid_04&pid_1234", &vid, &pid), "a short VID is not parsed");
+	check(ot_camera_refusal("USB Camera", "\\\\?\\usb#vid_04f2&pid_b70c&mi_00#x") != NULL,
+	      "the runtime's built-in tracker VID:PID is refused");
+	check(ot_camera_refusal("Some Camera", "\\\\?\\USB#VID_04E8&PID_20D7#y") != NULL, "  (any case)");
+	check(ot_camera_refusal("Eye Tracking Camera", "x") != NULL, "a name with 'eye track' is refused");
+	check(ot_camera_refusal("Stereo TRACKING CAMERA", NULL) != NULL, "a name with 'tracking camera' is refused");
+	check(ot_camera_refusal("Integrated Webcam", "\\\\?\\usb#vid_046d&pid_085e#z") == NULL, "a webcam is not");
+	check(ot_camera_refusal(NULL, NULL) == NULL, "nothing known: not refused");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -512,6 +532,9 @@ main(int argc, char **argv)
 	}
 	if (all || strcmp(which, "viewer") == 0) {
 		test_viewer();
+	}
+	if (all || strcmp(which, "camera-refusal") == 0) {
+		test_camera_refusal();
 	}
 	printf("%s\n", g_fail ? "FAILED" : "ok");
 	return g_fail ? 1 : 0;

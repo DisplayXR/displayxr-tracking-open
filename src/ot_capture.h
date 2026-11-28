@@ -4,13 +4,16 @@
  * @file
  * @brief  Camera capture behind one C interface. Backends:
  *
- *  - `ot_capture_avf.m` — macOS AVFoundation (the only real camera today);
- *  - `ot_capture_stub.c` — Windows / Linux: no camera yet (Media Foundation
- *    and V4L2 are follow-ups), so enumeration finds nothing and the provider
- *    declines in probe;
+ *  - `ot_capture_avf.m` — macOS AVFoundation;
+ *  - `ot_capture_mf.cpp` — Windows Media Foundation;
+ *  - `ot_capture_stub.c` — Linux: no camera yet (V4L2 is a follow-up), so
+ *    enumeration finds nothing and the provider declines in probe;
  *  - `ot_capture_file.c` — a "camera" that replays still images (binary PPM),
  *    every OS, selected by `DEVICE=file:<path>`: the hardware-free source of
  *    the fake-host tests. Never a default.
+ *
+ * Enumeration never lists a display's own tracker camera (ot_camera_refusal.h),
+ * so no backend opens one, whatever DEVICE says.
  *
  * Frames are kept in the process (never written anywhere). The backend copies
  * each frame into a latest-wins mailbox; each consumer takes the newest one,
@@ -42,15 +45,30 @@ extern "C" {
 #define OT_CAMERA_NAME_MAX 128
 #define OT_CAMERA_MAX 16
 
+//! This OS has a real camera backend (else only the file camera works).
+#if defined(__APPLE__) || defined(_WIN32)
+#define OT_HAVE_CAMERA_BACKEND 1
+#else
+#define OT_HAVE_CAMERA_BACKEND 0
+#endif
+
+//! Where the user turns the OS camera permission back on.
+#if defined(_WIN32)
+#define OT_CAMERA_PERMISSION_WHERE                                                                                     \
+	"Settings > Privacy & security > Camera (camera access, and \"Let desktop apps access your camera\")"
+#else
+#define OT_CAMERA_PERMISSION_WHERE "System Settings > Privacy & Security > Camera"
+#endif
+
 struct ot_camera_info
 {
-	char key[OT_CAMERA_KEY_MAX];   //!< stable id (AVCaptureDevice uniqueID; "file:<file name>")
-	char locator[1024];            //!< what opens it (the uniqueID; "file:<path>")
+	char key[OT_CAMERA_KEY_MAX];   //!< stable id (AVCaptureDevice uniqueID; MF symbolic link; "file:<file name>")
+	char locator[1024];            //!< what opens it (the uniqueID; the symbolic link; "file:<path>")
 	char name[OT_CAMERA_NAME_MAX]; //!< human name
 	bool builtin;                  //!< the machine's own camera
 };
 
-//! The OS camera permission for this process (macOS TCC; elsewhere always AUTHORIZED).
+//! The OS camera permission for this process (macOS TCC; Windows privacy switches; Linux always AUTHORIZED).
 enum ot_camera_auth
 {
 	OT_CAMERA_AUTHORIZED = 0,

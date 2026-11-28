@@ -3,9 +3,10 @@
 #
 # Build the provider, the fake host and the unit tests on macOS, Ubuntu 22.04 and Windows, run
 # every CTest that needs no camera, and check the provider exports exactly its two entry points (the
-# viewer role's and the hands role's). Windows and Linux build the capture stubs (no camera backend
-# yet). One macOS job also converts the models from the pinned upstream bundles (proving the pack's
-# sha256s reproduce) and runs the inference tests on the file camera. No job opens a camera.
+# viewer role's and the hands role's). Windows builds the Media Foundation capture, Linux the capture
+# stub (no camera backend yet). One macOS job also converts the models from the pinned upstream
+# bundles (proving the pack's sha256s reproduce) and runs the inference tests on the file camera; a
+# Windows job runs the same inference tests on those models (CPU). No job opens a camera.
 
 name: build
 
@@ -122,6 +123,15 @@ jobs:
           path: dist
           if-no-files-found: error
 
+      # The dev CLI that runs the provider on a real camera (otr-probe), for hardware tests from a CI build.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: otr-probe-${{ matrix.os }}
+          path: |
+            build/otr-probe
+            build/otr-probe.exe
+          if-no-files-found: error
+
   inference:
     name: models + inference (macOS)
     runs-on: macos-latest
@@ -158,6 +168,51 @@ jobs:
 
       - name: Pack blobs match
         run: python3 -I scripts/check_pack.py packs/open-tracking-default.models.json --verify-dir models-cache
+
+      - name: Models for the Windows inference job
+        uses: actions/upload-artifact@v4
+        with:
+          name: models-cache
+          path: |
+            models-cache/*.onnx
+            models-cache/*.json
+            models-cache/images
+          if-no-files-found: error
+
+  inference-windows:
+    name: inference (Windows, CPU)
+    needs: inference
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache pinned archives
+        uses: actions/cache@v4
+        with:
+          path: downloads
+          key: ort-${{ runner.os }}-${{ hashFiles('cmake/OnnxRuntime.cmake') }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: models-cache
+          path: models-cache
+
+      - name: Pack blobs match
+        run: python -I scripts/check_pack.py packs/open-tracking-default.models.json --verify-dir models-cache
+
+      - name: MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure + build
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENTRACK_WERROR=ON \
+            -DOPENTRACK_DOWNLOAD_DIR="${{ github.workspace }}/downloads" \
+            -DOPENTRACK_TEST_MODELS_DIR="${{ github.workspace }}/models-cache"
+          cmake --build build
+
+      - name: Tests (file camera, blank frame + face and hand photos, CPU)
+        run: ctest --test-dir build --output-on-failure
 
   reproduce-linux:
     name: model conversion reproduces on Linux (informational)

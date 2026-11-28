@@ -373,8 +373,8 @@ step for it is open). The focal length comes from `HFOV_DEG` × the camera pose'
   on the correct side, -Z along the bones, +Y out of the back of the hand, no pinch, on CPU and
   Core ML.
 - **Not verified:** a live camera hand test, two hands at once, the runtime's own loader and
-  `xrLocateHandJointsEXT` end to end (the fake host stands in for the runtime), Windows and Linux
-  capture (stubs, as for the viewer role).
+  `xrLocateHandJointsEXT` end to end (the fake host stands in for the runtime), the Windows
+  capture on a real camera, Linux capture (a stub, as for the viewer role).
 
 ### 11.7 Open
 

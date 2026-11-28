@@ -6,17 +6,18 @@ tracking** (`XR_EXT_hand_tracking` joints), with open models only. It is what a 
 tracker of its own: a laptop webcam is enough for head-coupled parallax.
 
 > **Status: the viewer role and the hands role work on macOS** (AVFoundation capture, ONNX
-> Runtime with Core ML). The hands role also reads the display's shared stereo camera where the
-> runtime offers it (any OS, in the service; verified against the fake host, not yet on a panel).
-> Windows (Media Foundation) and Linux (V4L2) webcam capture and the installers are follow-ups;
-> on those OSes the viewer role declines in `probe`, and the hands role does too unless the
-> runtime offers the shared camera. Design:
+> Runtime with Core ML). **Windows** has a Media Foundation webcam backend (ONNX Runtime on the
+> CPU); it builds and passes the camera-free tests in CI, and has not yet run on a Windows camera.
+> The hands role also reads the display's shared stereo camera where the runtime offers it (any
+> OS, in the service; verified against the fake host, not yet on a panel). Linux (V4L2) webcam
+> capture is a follow-up: there the viewer role declines in `probe`, and the hands role does too
+> unless the runtime offers the shared camera. Design:
 > [`docs/design.md`](docs/design.md) (hands: §11).
 
 | Role | Runtime class | Registry id | Status |
 |---|---|---|---|
-| Head + eye positions | viewer-tracking provider (ABI 1) | `open-tracking` | macOS |
-| Hand joints (26 per hand), pinch | input provider (ADR-034, input ABI 1) | `open-tracking-hands` | macOS (webcam); any OS whose runtime shares the display's stereo camera (code-complete, not yet run on a panel) |
+| Head + eye positions | viewer-tracking provider (ABI 1) | `open-tracking` | macOS; Windows (built, not yet run on a camera) |
+| Hand joints (26 per hand), pinch | input provider (ADR-034, input ABI 1) | `open-tracking-hands` | macOS (webcam); Windows (webcam: built, not yet run on a camera); any OS whose runtime shares the display's stereo camera (code-complete, not yet run on a panel) |
 
 - **A display that tracks the viewer itself always wins** (runtime policy): on such a screen this
   provider stays in standby and never opens a camera. It serves screens whose display declares
@@ -25,6 +26,11 @@ tracker of its own: a laptop webcam is enough for head-coupled parallax.
   hand joints are published.
 - **One camera, two roles:** both entry points are in one binary, and within a process both roles
   share one stream per camera (one privacy indicator); each runs its own inference on the frames.
+- **A display's own tracker camera is never opened as a webcam.** Camera enumeration drops every
+  device on the runtime's built-in tracker-camera list (ADR-043 Amendment 5: a few USB VID:PIDs
+  that display plug-ins have reported, and the words "tracking camera" / "eye track" in a device
+  name), so no `DEVICE` value can select one. The hands role reaches such a camera only through
+  the runtime's shared-camera slots.
 
 ## How it works
 
@@ -80,8 +86,8 @@ sharing toggle, session lock and in-use indicator, and hands out RECTIFIED side-
 eye = left half, never mirrored, usually 8-bit grey) with their rectified calibration (one focal
 length and principal point for both eyes, the right eye one baseline along the left eye's image
 +x). Only an input provider loaded **in the service** gets it: an in-process runtime has no camera
-manager, the open fails, and `auto` falls back to a webcam (on Windows and Linux, which have no
-webcam backend yet, the hands then stay ABSENT). While a webcam serves, the shared camera is tried
+manager, the open fails (for the life of the instance), and `auto` falls back to a webcam (on
+Linux, which has no webcam backend yet, the hands then stay ABSENT). While a webcam serves, the shared camera is tried
 again every 30 s; a refused consent is not asked again in that process.
 
 On the shared camera:
@@ -369,10 +375,9 @@ manifests and point `XRT_PLUGIN_SEARCH_PATH` at it; `displayxr-cli status --json
 `viewer_source: "provider:open-tracking"` for a simulated display. Windows:
 `HKLM\Software\DisplayXR\TrackingProviders\open-tracking` and
 `HKLM\Software\DisplayXR\InputProviders\open-tracking-hands` (`Binary`, `ProbeOrder`, `Settings`).
-The viewer role needs the Windows capture first; the hands role works there today through the
-display's shared camera (a dev build: the runtime's `scripts\register_dev_plugin.bat input
-<path>\DisplayXR-OpenTracking.dll open-tracking-hands` writes the row and allowlists the DLL for the
-provenance gate, which also lets it open the shared camera without a consent prompt).
+A dev build: the runtime's `scripts\register_dev_plugin.bat input <path>\DisplayXR-OpenTracking.dll
+open-tracking-hands` writes the hands row and allowlists the DLL for the provenance gate, which also
+lets it open the shared camera without a consent prompt.
 
 The install tree (`cmake --install build`, with `-DOPENTRACK_INSTALL_MODELS_DIR=models-cache` to
 include the blobs) is flat: the provider, `libonnxruntime`, the pack, the four models, `licenses/`.
@@ -402,11 +407,17 @@ pointing at the runtime's `scripts/macos_sign_notarize.sh` (ad-hoc without signi
 
 ## Follow-ups
 
-- Windows capture (Media Foundation; DirectML build of ONNX Runtime) and Linux capture (V4L2).
-  Deferred on purpose: a webcam backend must never open a display's own tracker camera (ADR-043
-  Amendment 5; open/close cycles have wedged one), and the runtime's list of claimed cameras is not
-  exposed to providers. The safe order is a runtime host slot that answers "may I open this
-  device?" first, then the backends. On Windows the hands come from the shared camera meanwhile.
+- Linux capture (V4L2).
+- The camera denylist is the runtime's built-in part only. The active display plug-in's own
+  declarations (`get_claimed_cameras`, ADR-043 Amendment 5) are not exposed to providers; a host
+  slot that answers "may I open this device?" would cover cameras not on the built-in list.
+- Windows: a GPU execution provider (the DirectML build of ONNX Runtime stopped at an older
+  release; the CPU one runs today); telling the built-in camera from an external one (Media
+  Foundation does not say: the first listed camera is the default, `DEVICE` picks another).
+- Windows under the service: the viewer role (in `displayxr-tracking-host`) and the hands role (in
+  `displayxr-service`) open the same webcam from two processes. Whether Windows' camera frame
+  server lets both stream depends on the Windows version and the camera; the second open retries
+  every 2 s and logs "in use by another application" (design §11.7).
 - Hands: a live-camera test (incl. two hands), a per-user hand-size calibration on a webcam (the
   shared camera measures it), a proper thumb frame; under the service the two roles run in
   different processes (design §11.7).
