@@ -160,8 +160,9 @@ deliberate converter or model change. `scripts/check_pack.py` validates a pack
 ## Build and test
 
 Plain CMake and a C11 compiler (Objective-C for the macOS capture). The build fetches ONNX
-Runtime 1.31.0 as a pinned, SHA-256-checked release archive (`cmake/OnnxRuntime.cmake`:
-osx-arm64, linux-x64, win-x64) and places it next to the provider; it is loaded at run time by
+Runtime 1.31.0 as a pinned, SHA-256-checked package (`cmake/OnnxRuntime.cmake`: Microsoft's
+`Microsoft.ML.OnnxRuntime` NuGet package, which carries osx-arm64, linux-x64 and win-x64) and
+places the library next to the provider; it is loaded at run time by
 absolute path through `OrtGetApiBase`, never linked.
 
 ```
