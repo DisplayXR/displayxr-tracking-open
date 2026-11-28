@@ -71,7 +71,10 @@
 #include <string.h>
 
 #define OTH_ID "open-tracking-hands"
-#define OTH_VERSION "0.2.0"
+#ifndef OPENTRACK_VERSION
+#define OPENTRACK_VERSION "0.0.0"
+#endif
+#define OTH_VERSION OPENTRACK_VERSION
 
 /*
  * Hands default to Core ML on macOS: live, a palm held still jitters no more than on the CPU (1.6 / 0.3 /

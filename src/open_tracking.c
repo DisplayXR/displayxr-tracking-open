@@ -38,7 +38,10 @@
 #include <string.h>
 
 #define OT_ID "open-tracking"
-#define OT_VERSION "0.1.0"
+#ifndef OPENTRACK_VERSION
+#define OPENTRACK_VERSION "0.0.0"
+#endif
+#define OT_VERSION OPENTRACK_VERSION
 
 
 /*
