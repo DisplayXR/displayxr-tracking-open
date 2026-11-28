@@ -47,9 +47,6 @@ permissions:
   contents: write
 
 env:
-  # The oldest runtime whose displayxr-tracking-host carries the camera entitlement + usage
-  # string: an older host cannot open the camera, so the .pkg refuses to install over it.
-  MIN_RUNTIME: '2.58.0'
   SIGN_SCRIPT_TAG: 'v2.57.4'
   SIGN_SCRIPT_SHA256: 'd8a5902ddaff1b49829cfe321c1d0ee9edbc79f806a591facf4d49c1468d5bf3'
 
@@ -66,6 +63,11 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="${{ inputs.version || '0.0.0' }}"; fi
           echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::bad version '$v'"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          # The oldest runtime whose displayxr-tracking-host carries the camera entitlement + usage
+          # string (CMakeLists.txt DXR_TRACKING_MIN_RUNTIME_VERSION): the .pkg refuses an older one.
+          mr=$(sed -nE 's/^set\(DXR_TRACKING_MIN_RUNTIME_VERSION "([0-9.]+)"\)/\1/p' CMakeLists.txt)
+          echo "$mr" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::no DXR_TRACKING_MIN_RUNTIME_VERSION in CMakeLists.txt"; exit 1; }
+          echo "MIN_RUNTIME=$mr" >> "$GITHUB_ENV"
           # A tag names the version the binaries report (CMakeLists.txt project VERSION): bump it first.
           pv=$(sed -nE 's/^project\(displayxr_tracking_open VERSION ([0-9.]+) .*/\1/p' CMakeLists.txt)
           if [ "${GITHUB_REF_TYPE}" = tag ] && [ "$v" != "$pv" ]; then
@@ -281,6 +283,9 @@ jobs:
     needs: [macos, windows]
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@v4
+      - name: Minimum runtime
+        run: echo "MIN_RUNTIME=$(sed -nE 's/^set\(DXR_TRACKING_MIN_RUNTIME_VERSION "([0-9.]+)"\)/\1/p' CMakeLists.txt)" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           pattern: open-tracking-*
@@ -299,3 +304,39 @@ jobs:
           - **macOS (Apple silicon):** \`DisplayXR-OpenTracking-${GITHUB_REF_NAME#v}.pkg\`. Requires DisplayXR runtime ${MIN_RUNTIME} or later. Installs into /Library/Application Support/DisplayXR; remove with \`sudo \"/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/uninstall.sh\"\`.
 
           Models: MediaPipe Face Landmarker and Hand Landmarker (Apache-2.0); ONNX Runtime (MIT); see licenses/."
+
+  # Tell displayxr-runtime to bump versions.json[tracking_open] to this tag, as the conversion
+  # providers do for theirs. The first release ADDS the field (the runtime's
+  # scripts/apply_versions_bump.py FIRST_RELEASE_FIELDS). Needs `release`, so the runtime side always
+  # finds the assets. The App token is the org's publish bot (org secrets DISPLAYXR_APP_ID /
+  # DISPLAYXR_APP_PRIVATE_KEY). Forks skip it. By hand:
+  #   gh workflow run versions-bump.yml -R DisplayXR/displayxr-runtime \
+  #     -f field=tracking_open -f tag=vX.Y.Z -f source_repo=DisplayXR/displayxr-tracking-open
+  # Gated on the repository variable DXR_VERSIONS_BUMP=true, set once the runtime knows the field
+  # (displayxr-runtime#2884): before that the runtime refuses an unknown field.
+  dispatch-versions-bump:
+    if: github.repository_owner == 'DisplayXR' && github.ref_type == 'tag' && vars.DXR_VERSIONS_BUMP == 'true'
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint dispatch token
+        id: dispatch-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DISPLAYXR_APP_ID }}
+          private-key: ${{ secrets.DISPLAYXR_APP_PRIVATE_KEY }}
+          owner: DisplayXR
+          repositories: displayxr-runtime
+
+      - name: Dispatch versions.json bump
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.dispatch-token.outputs.token }}
+          repository: DisplayXR/displayxr-runtime
+          event-type: versions-bump
+          client-payload: |
+            {
+              "field":       "tracking_open",
+              "tag":         "${{ github.ref_name }}",
+              "source_repo": "${{ github.repository }}"
+            }

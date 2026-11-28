@@ -24,9 +24,14 @@ elseif(WIN32)
 	set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
-# The runtime commit the vendored include/xrt/ headers were copied from (README "The ABI it builds
-# against"). Metadata only: nothing compiles against it.
-set(DXR_RUNTIME_GIT_TAG "v2.53.0-17-ge5d7ffa57")
+# The runtime release the vendored include/xrt/ headers were generated from (README "The ABI it
+# builds against"). Metadata only: nothing compiles against it. A vX.Y.Z tag: the runtime's
+# downstream-pins `layout` track reads it to decide when a runtime release needs a rebuild here.
+set(DXR_RUNTIME_GIT_TAG "v2.70.8")
+# The oldest runtime this provider supports (X.Y.Z, no "v"): the first whose tracking host may open
+# the camera on macOS. The macOS .pkg refuses an older runtime; the runtime's catalog reads it as
+# the item's floor.
+set(DXR_TRACKING_MIN_RUNTIME_VERSION "2.58.0")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
