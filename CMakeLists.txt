@@ -14,7 +14,8 @@
 # test photos under <dir>/images) enables the inference tests.
 
 cmake_minimum_required(VERSION 3.22)
-project(displayxr_tracking_open VERSION 0.1.0 LANGUAGES C)
+# The release version: a vX.Y.Z tag must equal it (release.yml checks). Both roles report it.
+project(displayxr_tracking_open VERSION 0.2.0 LANGUAGES C)
 if(APPLE)
 	enable_language(OBJC)
 elseif(WIN32)
@@ -100,6 +101,7 @@ add_library(${OPENTRACK_PROVIDER} MODULE
 	${OPENTRACK_CORE_SOURCES}
 	${OPENTRACK_CAPTURE_SOURCES})
 target_include_directories(${OPENTRACK_PROVIDER} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(${OPENTRACK_PROVIDER} PRIVATE OPENTRACK_VERSION="${PROJECT_VERSION}")
 # The vendored runtime headers are SYSTEM (/external:I on MSVC): they are generated from the runtime's and may warn
 # under this build's flags (an assert-only local in xrt_defines.h is C4189 in Release).
 target_include_directories(${OPENTRACK_PROVIDER} SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

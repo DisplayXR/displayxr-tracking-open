@@ -66,6 +66,11 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="${{ inputs.version || '0.0.0' }}"; fi
           echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::bad version '$v'"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          # A tag names the version the binaries report (CMakeLists.txt project VERSION): bump it first.
+          pv=$(sed -nE 's/^project\(displayxr_tracking_open VERSION ([0-9.]+) .*/\1/p' CMakeLists.txt)
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "$v" != "$pv" ]; then
+            echo "::error::tag v$v but CMakeLists.txt project VERSION is $pv: bump it in a PR, then tag"; exit 1
+          fi
 
       - name: Fetch the signing script (pinned)
         run: |
