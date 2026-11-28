@@ -6,6 +6,7 @@
  */
 
 #include "ot_capture_impl.h"
+#include "ot_camera_refusal.h"
 #include "ot_platform.h"
 
 #include <ctype.h>
@@ -160,10 +161,28 @@ ot_capture_alloc(void)
 	return c;
 }
 
+//! The platform's cameras minus a display's own tracker cameras, which are never listed (so never opened).
+static uint32_t
+enumerate_allowed(struct ot_camera_info *out, uint32_t max)
+{
+	const uint32_t n = ot_capture_platform_enumerate(out, max);
+	uint32_t k = 0;
+	for (uint32_t i = 0; i < n && i < max; i++) {
+		if (ot_camera_refusal(out[i].name, out[i].locator) != NULL) {
+			continue;
+		}
+		if (k != i) {
+			out[k] = out[i];
+		}
+		k++;
+	}
+	return k;
+}
+
 uint32_t
 ot_capture_enumerate(struct ot_camera_info *out, uint32_t max)
 {
-	return ot_capture_platform_enumerate(out, max);
+	return enumerate_allowed(out, max);
 }
 
 static bool
@@ -187,7 +206,7 @@ ot_capture_resolve(const char *sel, struct ot_camera_info *out)
 		return ot_capture_file_resolve(sel + 5, out);
 	}
 	struct ot_camera_info cams[OT_CAMERA_MAX];
-	const uint32_t n = ot_capture_platform_enumerate(cams, OT_CAMERA_MAX);
+	const uint32_t n = enumerate_allowed(cams, OT_CAMERA_MAX);
 	if (n == 0) {
 		return false;
 	}

@@ -892,7 +892,7 @@ open_webcam(const struct oth_config *c, struct oth_source *s, char *err, size_t 
 			    err, err_size, "%s",
 			    auth == OT_CAMERA_RESTRICTED
 			        ? "a policy restricts camera access"
-			        : "allow it in System Settings > Privacy & Security > Camera, then restart the app");
+			        : "allow it in " OT_CAMERA_PERMISSION_WHERE ", then restart the app");
 			*fatal = !want_shared(c);
 			return false;
 		}
@@ -1892,7 +1892,7 @@ oth_probe(struct xrt_input_plugin_instance **out_inst)
 	const char *webcam_why = "SOURCE=shared";
 	if (c.source != OTH_SOURCE_SHARED) {
 		webcam = ot_capture_resolve(c.device, &cam);
-#if defined(__APPLE__)
+#if OT_HAVE_CAMERA_BACKEND
 		webcam_why = c.device[0] != '\0' ? "no camera matches DEVICE" : "no camera";
 #else
 		webcam_why = "no webcam backend on this OS yet (only DEVICE=file:<ppm> for tests)";
@@ -1902,7 +1902,7 @@ oth_probe(struct xrt_input_plugin_instance **out_inst)
 			if (a == OT_CAMERA_DENIED || a == OT_CAMERA_RESTRICTED) {
 				webcam = false;
 				webcam_why = a == OT_CAMERA_DENIED ? "camera permission denied for this process "
-				                                     "(System Settings > Privacy & Security > Camera)"
+				                                     "(" OT_CAMERA_PERMISSION_WHERE ")"
 				                                   : "camera permission restricted by policy";
 			}
 		}

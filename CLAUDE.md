@@ -8,7 +8,8 @@ The **DisplayXR open camera tracking provider** (`DisplayXR-OpenTracking`): one 
 turns a camera into viewer tracking (registered as `open-tracking`, the first open
 viewer-tracking provider) and hand tracking (`open-tracking-hands`, an input provider; one binary,
 two entry points). Design: `docs/design.md` (hands: §11). Status: both roles run on macOS
-(AVFoundation); Windows (Media Foundation) and Linux (V4L2) capture are follow-ups.
+(AVFoundation) and Windows (Media Foundation, not yet run on a camera); Linux (V4L2) capture is a
+follow-up.
 
 **Public repository.** No internal data anywhere (code, comments, commit messages, docs): no
 vendor or product names, no internal measurements, no vendor-module internals. Refer to a display
@@ -34,7 +35,9 @@ as pinned, hash-checked archives; never commit a model blob.
   the One Euro filter (pure).
 - `src/ot_viewer.{c,h}` — one face result -> one `xrt_tracking_viewer_sample` (pure).
 - `src/ot_capture*.{c,h,m}` — capture: AVFoundation (macOS), the PPM file camera (tests, every
-  OS), stubs (Windows, Linux); one shared, reference-counted stream per device per process.
+  OS), Media Foundation (`ot_capture_mf.cpp`, Windows), a stub (Linux); one shared,
+  reference-counted stream per device per process. `src/ot_camera_refusal.{c,h}` — the runtime's
+  built-in tracker-camera denylist, applied to every enumeration (keep it equal to the runtime's).
 - `src/ot_ort.{c,h}` — ONNX Runtime by absolute path (`OrtGetApiBase` only), CPU / Core ML.
 - `src/ot_pack.{c,h}`, `src/ot_json.{c,h}`, `src/ot_sha256.{c,h}`, `src/ot_platform.{c,h}`.
 - `tools/fake_host.{c,h}` — the stand-in runtime host; `tools/fakehost.c` (CTest driver),
@@ -60,7 +63,7 @@ as pinned, hash-checked archives; never commit a model blob.
 - The camera-space block is the RAW measurement (unfiltered, not scaled by the iris scale): the
   runtime's calibration solves against it.
 - Shared C stays MSVC / MinGW portable (no `pid_t`, no C11 atomics, no `<unistd.h>` in headers);
-  Objective-C only in `ot_capture_avf.m`.
+  Objective-C only in `ot_capture_avf.m`, C++ (COM) only in `ot_capture_mf.cpp`.
 
 ## Building
 
