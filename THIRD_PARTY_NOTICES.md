@@ -2,7 +2,7 @@
 
 The provider's own source is [BSL-1.0](LICENSE). It ships next to, and loads at run time, the
 components below; none is linked into the provider binary and none is committed to this
-repository (the build fetches ONNX Runtime as a pinned, hash-checked release archive, see
+repository (the build fetches ONNX Runtime as a pinned, hash-checked package, see
 `cmake/OnnxRuntime.cmake`; the model blobs are produced by `scripts/fetch_models.py` from a
 pinned upstream download, see `packs/open-tracking-default.models.json`).
 
@@ -10,7 +10,7 @@ pinned upstream download, see `packs/open-tracking-default.models.json`).
 
 | Component | Version | Licence | Where it comes from | Platforms |
 |---|---|---|---|---|
-| ONNX Runtime | 1.31.0 | MIT | `onnxruntime-{osx-arm64,linux-x64}-1.31.0.tgz`, `onnxruntime-win-x64-1.31.0.zip` GitHub release assets of [microsoft/onnxruntime](https://github.com/microsoft/onnxruntime/releases/tag/v1.31.0) | all |
+| ONNX Runtime | 1.31.0 | MIT | the `Microsoft.ML.OnnxRuntime` 1.31.0 [NuGet package](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime/1.31.0) (`runtimes/{osx-arm64,linux-x64,win-x64}/native/`) | all |
 
 The licence texts are installed under `licenses/` next to the binary (`onnxruntime-LICENSE.txt`,
 `onnxruntime-ThirdPartyNotices.txt`). On macOS the Core ML execution provider, part of the

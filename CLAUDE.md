@@ -69,7 +69,7 @@ Inference tests need `-DOPENTRACK_TEST_MODELS_DIR=<dir>` filled by
 
 - License every new file `BSL-1.0` with a `The DisplayXR Project` copyright header.
 - Runtime style: tabs, 120 columns (`.clang-format`), `snake_case`, the `ot_` prefix.
-- Bumping ONNX Runtime: change the version and every SHA-256 in `cmake/OnnxRuntime.cmake`.
+- Bumping ONNX Runtime: change the version and the NuGet package's SHA-256 in `cmake/OnnxRuntime.cmake`.
 - Changing a model or a converter pin: new pack `version`; regenerate with `--update-pack`, and
   re-run `scripts/check_pack.py --verify-dir`.
 - Commits: conventional-commit subjects.
