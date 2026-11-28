@@ -405,6 +405,36 @@ pose (stored in `~/.config/monado/camera-calibration.json`). Remove with
 Build one locally: `scripts/package_macos.sh <install-tree> <version> <out.pkg>` with `SIGN`
 pointing at the runtime's `scripts/macos_sign_notarize.sh` (ad-hoc without signing identities).
 
+### Windows installer
+
+`DisplayXROpenTrackingSetup-X.Y.Z.exe` (a release asset; built by `.github/workflows/release.yml`
+on a `vX.Y.Z` tag with the models the macOS job converts, checked against the pack again;
+`installer/DisplayXROpenTrackingInstaller.nsi`) installs the flat tree into
+`%ProgramFiles%\DisplayXR\Plugins\OpenTracking` and writes both rows:
+
+```
+HKLM\Software\DisplayXR\TrackingProviders\open-tracking        Binary, DisplayName, Vendor, ProbeOrder 100, Version
+HKLM\Software\DisplayXR\InputProviders\open-tracking-hands     the same binary, ProbeOrder 100
+HKLM\Software\DisplayXR\Plugins\OpenTracking                   InstallPath, Version (the install marker)
+HKLM\Software\DisplayXR\Trust\Allowlist\<sha256 of the DLL>     the provenance allowlist row
+```
+
+- The CI build is unsigned, so the installer carries the SHA-256 of exactly the DLL it ships
+  (`installer/gen_allowlist_nsh.cmake`): the runtime's provenance gate admits it as
+  `allowlisted`, which also gives it the `component` consent verdict for the display's shared
+  camera (no prompt). A signed release comes from the signing provider, which rebuilds the tag
+  with `SIGN_CMD`.
+- No runtime prerequisite (the bundle installs components in any order). The runtime scans
+  providers when a process starts, so a running DisplayXR service is stopped before the files
+  are written and started again afterwards, at Medium integrity through `explorer.exe`;
+  `/NOSTART` skips the restart. A DLL an in-process app still maps is renamed aside and
+  removed at the next reboot.
+- `/S` is silent. The uninstaller (Settings > Apps, or `Uninstall.exe /S`) removes both rows,
+  the marker, its allowlist row and the files, and restarts the service the same way.
+- Windows asks for no camera permission per app: the camera privacy switches (Settings >
+  Privacy & security > Camera: camera access, and "Let desktop apps access your camera") must
+  be on. With either off, `probe` declines and says so.
+
 ## Follow-ups
 
 - Linux capture (V4L2).
@@ -424,8 +454,8 @@ pointing at the runtime's `scripts/macos_sign_notarize.sh` (ad-hoc without signi
 - Hands on the shared camera: the panel test (does a tracker camera aimed at the face see hands at
   all, and does grey input detect them); the display's declared camera pose (runtime #2296) instead
   of the bezel prior; per-landmark stereo if the scale-only fold proves too coarse.
-- Installers (`DisplayXROpenTrackingSetup-*.exe`, `.deb`; the macOS `.pkg` ships), the meta-installer's "Tracking
-  providers" section, `versions.json` `tracking_open`, signing / the Windows allowlist row.
+- A Linux `.deb`; the meta-installer's "Tracking providers" section; signing of the Windows
+  installer by the signing provider.
 - Camera intrinsics: a per-camera HFOV / distortion table, or a calibration step.
 
 ## The ABI it builds against

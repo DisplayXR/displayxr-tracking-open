@@ -1,12 +1,20 @@
 # Copyright 2026, The DisplayXR Project
 # SPDX-License-Identifier: BSL-1.0
 #
-# macOS release: on a vX.Y.Z tag, build the provider (arm64, Release), convert the models from
-# the pinned upstream bundle (bit-identical to the pack), package them as
-# DisplayXR-OpenTracking-X.Y.Z.pkg (scripts/package_macos.sh), sign + notarize + staple it with
-# the DisplayXR org's Developer ID, and attach it to the GitHub Release.
-# workflow_dispatch builds the same .pkg as an artifact without releasing (signed when the
-# secrets are present), for a test install.
+# Release: on a vX.Y.Z tag,
+#  - macOS: build the provider (arm64, Release), convert the models from the pinned upstream
+#    bundle (bit-identical to the pack), package them as DisplayXR-OpenTracking-X.Y.Z.pkg
+#    (scripts/package_macos.sh), sign + notarize + staple it with the DisplayXR org's Developer ID;
+#  - Windows: build the provider (x64, Release) with the SAME converted models (checked against
+#    the pack again), and package DisplayXROpenTrackingSetup-X.Y.Z.exe (NSIS,
+#    installer/DisplayXROpenTrackingInstaller.nsi). This build is unsigned; it carries the
+#    provenance allowlist row for the DLL it ships. A signed release comes from the signing
+#    provider (the runtime's docs/specs/runtime/release-signing.md, driven by `/dxr-release`),
+#    which rebuilds the tag with SIGN_CMD and replaces the unsigned installer;
+#  - attach both to the GitHub Release, then ask displayxr-runtime to bump
+#    versions.json[tracking_open] to the tag.
+# workflow_dispatch (and a PR touching the packaging) builds both as artifacts without releasing
+# (the .pkg signed when the secrets are present), for a test install.
 #
 # Signing uses the runtime's scripts/macos_sign_notarize.sh, fetched at a pinned tag and checked
 # against its sha256. The org secrets enter the environment in one step only. A build without
@@ -25,6 +33,7 @@ on:
       - '.github/workflows/release.yml'
       - 'scripts/package_macos.sh'
       - 'scripts/macos/**'
+      - 'installer/**'
       - 'packs/**'
       - 'CMakeLists.txt'
   workflow_dispatch:
@@ -147,14 +156,141 @@ jobs:
           path: ${{ env.PKG }}
           if-no-files-found: error
 
-      - name: GitHub Release
-        if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" "$PKG" --title "DisplayXR Open Tracking $GITHUB_REF_NAME" \
-            --notes "macOS (Apple silicon) installer for the open camera tracking provider: head and eye tracking, and hand tracking, from the built-in camera. Requires DisplayXR runtime ${MIN_RUNTIME} or later. Installs into /Library/Application Support/DisplayXR; remove with \`sudo \"/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/uninstall.sh\"\`. Models: MediaPipe Face Landmarker and Hand Landmarker (Apache-2.0); ONNX Runtime (MIT); see licenses/."
+      # The Windows job packages these exact bytes (checked against the pack there again).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-models
+          path: |
+            models-cache/*.onnx
+          if-no-files-found: error
 
       - name: Tear down the keychain
         if: always()
         run: '[ -z "${SIGN:-}" ] || "$SIGN" ci-keychain-teardown || true'
+
+  windows:
+    name: Windows installer
+    needs: macos
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="${{ inputs.version || '0.0.0' }}"; fi
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::bad version '$v'"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pinned archives
+        uses: actions/cache@v4
+        with:
+          path: downloads
+          key: ort-${{ runner.os }}-${{ hashFiles('cmake/OnnxRuntime.cmake') }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-models
+          path: models-cache
+
+      - name: Models match the pack
+        run: python -I scripts/check_pack.py packs/open-tracking-default.models.json --verify-dir models-cache
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build + install tree
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENTRACK_WERROR=ON \
+            -DOPENTRACK_BUILD_TESTS=OFF -DOPENTRACK_BUILD_PROBE=OFF \
+            -DOPENTRACK_DOWNLOAD_DIR="${{ github.workspace }}/downloads" \
+            -DOPENTRACK_INSTALL_MODELS_DIR="${{ github.workspace }}/models-cache"
+          cmake --build build
+          cmake --install build --prefix dist
+          ls -la dist
+
+      - name: NSIS
+        run: choco install nsis -y --no-progress
+
+      # ADR-054 N4b: the runtime's provenance gate enforces on Windows and this build is unsigned,
+      # so the installer carries the SHA-256 of the DLL it ships (an allowlist row).
+      - name: Allowlist row for the unsigned provider DLL
+        shell: pwsh
+        run: |
+          cmake "-DBIN_DIR=$PWD\dist" "-DVERSION=${{ steps.ver.outputs.version }}" "-DOUT=$PWD\build\Allowlist.nsh" -P installer\gen_allowlist_nsh.cmake
+          if ($LASTEXITCODE -ne 0) { throw "gen_allowlist_nsh failed" }
+          Get-Content build\Allowlist.nsh
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DVERSION=${{ steps.ver.outputs.version }}" "/DDIST_DIR=$PWD\dist" "/DOUTPUT_DIR=$PWD\out" "/DALLOWLIST_NSH=$PWD\build\Allowlist.nsh" installer\DisplayXROpenTrackingInstaller.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+          Get-ChildItem out
+
+      # Install silently on the runner (no runtime there: the rows are written all the same), check the
+      # files, the two rows, the marker and the allowlist row, then uninstall and check it is all gone.
+      - name: Install + uninstall smoke test
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem out\DisplayXROpenTrackingSetup-*.exe | Select-Object -First 1
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "install exit $($p.ExitCode)" }
+          $dir = "$env:ProgramFiles\DisplayXR\Plugins\OpenTracking"
+          foreach ($f in 'DisplayXR-OpenTracking.dll','onnxruntime.dll','open-tracking-default.models.json','face_detector.onnx','face_landmarks.onnx','hand_detector.onnx','hand_landmarks.onnx','licenses\LICENSE','licenses\THIRD_PARTY_NOTICES.md','licenses\mediapipe-models-Apache-2.0.txt','licenses\onnxruntime-LICENSE.txt','Uninstall.exe') {
+            if (-not (Test-Path "$dir\$f")) { throw "missing $f" }
+          }
+          $dll = "$dir\DisplayXR-OpenTracking.dll"
+          $v = Get-ItemProperty 'HKLM:\Software\DisplayXR\TrackingProviders\open-tracking'
+          $h = Get-ItemProperty 'HKLM:\Software\DisplayXR\InputProviders\open-tracking-hands'
+          if ($v.Binary -ne $dll -or $h.Binary -ne $dll) { throw "row Binary: '$($v.Binary)' / '$($h.Binary)'" }
+          if ($v.Version -ne '${{ steps.ver.outputs.version }}' -or $h.Version -ne '${{ steps.ver.outputs.version }}') { throw "row Version" }
+          if ($v.ProbeOrder -ne 100 -or $h.ProbeOrder -ne 100) { throw "ProbeOrder" }
+          $m = Get-ItemProperty 'HKLM:\Software\DisplayXR\Plugins\OpenTracking'
+          if ($m.Version -ne '${{ steps.ver.outputs.version }}' -or $m.InstallPath -ne $dir) { throw "marker" }
+          $sha = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
+          $al = Get-ItemProperty 'HKLM:\Software\DisplayXR\Trust\Allowlist'
+          if (-not $al.PSObject.Properties[$sha]) { throw "no allowlist row for $sha" }
+          Write-Host "installed: rows, marker and allowlist row ($sha) present"
+          $p = Start-Process -FilePath "$dir\Uninstall.exe" -ArgumentList '/S', "_?=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstall exit $($p.ExitCode)" }
+          Remove-Item "$dir\Uninstall.exe" -ErrorAction SilentlyContinue
+          foreach ($k in 'HKLM:\Software\DisplayXR\TrackingProviders\open-tracking','HKLM:\Software\DisplayXR\InputProviders\open-tracking-hands','HKLM:\Software\DisplayXR\Plugins\OpenTracking') {
+            if (Test-Path $k) { throw "left behind: $k" }
+          }
+          if ((Test-Path 'HKLM:\Software\DisplayXR\Trust\Allowlist') -and (Get-ItemProperty 'HKLM:\Software\DisplayXR\Trust\Allowlist').PSObject.Properties[$sha]) { throw "allowlist row left behind" }
+          if (Test-Path $dll) { throw "DLL left behind" }
+          Write-Host "uninstalled cleanly"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-tracking-windows-installer
+          path: out/DisplayXROpenTrackingSetup-*.exe
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    if: github.ref_type == 'tag'
+    needs: [macos, windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: open-tracking-*
+          path: assets
+          merge-multiple: true
+      - run: ls -l assets
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" assets/*.pkg assets/*.exe -R "$GITHUB_REPOSITORY" \
+            --title "DisplayXR Open Tracking $GITHUB_REF_NAME" \
+            --notes "The open camera tracking provider: head and eye tracking, and hand tracking, from an ordinary camera.
+
+          - **Windows (x64):** \`DisplayXROpenTrackingSetup-${GITHUB_REF_NAME#v}.exe\`. Installs into Program Files\\DisplayXR\\Plugins\\OpenTracking and registers both roles with the runtime; uninstall from Settings > Apps.
+          - **macOS (Apple silicon):** \`DisplayXR-OpenTracking-${GITHUB_REF_NAME#v}.pkg\`. Requires DisplayXR runtime ${MIN_RUNTIME} or later. Installs into /Library/Application Support/DisplayXR; remove with \`sudo \"/Library/Application Support/DisplayXR/lib/displayxr/plugins/open-tracking/uninstall.sh\"\`.
+
+          Models: MediaPipe Face Landmarker and Hand Landmarker (Apache-2.0); ONNX Runtime (MIT); see licenses/."
