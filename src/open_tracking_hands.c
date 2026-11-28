@@ -30,8 +30,12 @@
  *  - get_presence: PRESENT while a usable camera exists (hands out of view are
  *    inactive joints, never ABSENT); on the shared camera it follows the
  *    stream (ABSENT while it waits for a 3D session, is suspended or ended).
- *    ABSENT for a reason that may pass turns PRESENT again 30 s later, so the
- *    next app's locate retries;
+ *    While ABSENT and an app holds hand devices the thread keeps looking for a
+ *    source (it does not idle out: nobody locates an absent provider's joints)
+ *    and presence turns PRESENT when frames flow; an in-process runtime's
+ *    "not supported" answer is final for the instance (spec §4d.4). After the
+ *    app's devices are gone, ABSENT for a reason that may pass turns PRESENT
+ *    again 30 s later, so the next app's locate retries;
  *  - get_engaged_ns (CONTROLLERS=1 only): the last time each hand pinched, so
  *    the controller role goes to the hands when one pinches and back to the
  *    keyboard and mouse when they are used (ADR-034 Amendment 6). The runtime
@@ -609,8 +613,12 @@ stop_or_idle(const struct oth_config *c)
 	}
 	ot_lock(&g_h.lock);
 	const int64_t last = g_h.last_demand_ns;
+	// ABSENT while an app holds hand devices: nobody locates an absent provider's joints, so idling out here
+	// would only come back by offering PRESENT on a timer, and the roles would flap. Keep looking for a source
+	// instead (spec §4d.2: PRESENT when frames flow); the last device's destroy stops the worker.
+	const bool watch = g_h.presence == XRT_INPUT_PROVIDER_PRESENCE_ABSENT && g_live_devices > 0;
 	ot_unlock(&g_h.lock);
-	return ot_monotonic_ns() - last > (int64_t)c->idle_s * 1000000000LL;
+	return !watch && ot_monotonic_ns() - last > (int64_t)c->idle_s * 1000000000LL;
 }
 
 static bool
@@ -789,8 +797,11 @@ shared_failed(xrt_result_t r, bool webcam_fallback)
 	ot_lock(&g_h.lock);
 	const bool new_reason = g_h.shared_last_code != (int32_t)r;
 	g_h.shared_last_code = (int32_t)r;
-	// Consent refused / not authorized: asking again would prompt again. Everything else may pass.
-	if (r == XRT_ERROR_STEREO_CAMERA_CONSENT_REFUSED || r == XRT_ERROR_NOT_AUTHORIZED) {
+	// Consent refused / not authorized: asking again would prompt again. Not supported: an in-process
+	// runtime, which has no camera manager, for the life of the instance (spec §4d.4). Everything else may
+	// pass.
+	if (r == XRT_ERROR_STEREO_CAMERA_CONSENT_REFUSED || r == XRT_ERROR_NOT_AUTHORIZED ||
+	    r == XRT_ERROR_FEATURE_NOT_SUPPORTED) {
 		g_h.shared_refused = true;
 	}
 	g_h.shared_retry_ns = now + (webcam_fallback ? OTH_SHARED_RETRY_WITH_WEBCAM_NS : OTH_SHARED_RETRY_NS);
@@ -819,6 +830,18 @@ open_shared(const struct oth_config *c, struct oth_source *s)
 		shared_failed(r, c->source == OTH_SOURCE_AUTO);
 		return false;
 	}
+	if (info.frame_orientation_deg != 0 && info.frame_orientation_deg != 0xFFFFFFFFu) {
+		// Rotated frames: the camera frame's axes would need the same rotation, which this provider does not
+		// apply. Publishing would put the hands rotated in display space; decline the shared camera instead.
+		ot_shcam_close(sh);
+		ot_lock(&g_h.lock);
+		g_h.shared_refused = true;
+		ot_unlock(&g_h.lock);
+		log_line("shared stereo camera '%s': its frames are rotated by %u deg, which this provider does not "
+		         "support: not used",
+		         info.name, info.frame_orientation_deg);
+		return false;
+	}
 	ot_lock(&g_h.lock);
 	g_h.shared_last_code = 0;
 	ot_unlock(&g_h.lock);
@@ -836,12 +859,9 @@ open_shared(const struct oth_config *c, struct oth_source *s)
 	s->eye_offset[2] = 0.0f;
 	ot_copy_str(s->key, sizeof(s->key), info.key);
 	ot_copy_str(s->name, sizeof(s->name), info.name);
-	log_line("shared stereo camera '%s' (%s): %ux%u per eye, %.0f Hz cap, f %.1f px, baseline %.1f mm%s%s",
+	log_line("shared stereo camera '%s' (%s): %ux%u per eye, %.0f Hz cap, f %.1f px, baseline %.1f mm%s",
 	         info.name, info.key, info.eye_width, info.eye_height, (double)info.max_frame_rate, (double)info.k.f,
-	         (double)info.baseline_m * 1000.0, s->stereo ? ", stereo hand scale on" : ", one eye only",
-	         info.frame_orientation_deg != 0 && info.frame_orientation_deg != 0xFFFFFFFFu
-	             ? " (frames are rotated: the hands are tracked as delivered)"
-	             : "");
+	         (double)info.baseline_m * 1000.0, s->stereo ? ", stereo hand scale on" : ", one eye only");
 	return true;
 }
 
@@ -1079,6 +1099,7 @@ worker(void *arg)
 				continue;
 			}
 			adopt_source(&c, &src, &k, &pose_raw, &pose, tracker, &hands);
+			c.hands.hand_scale = user_scale; // a new camera: the stereo factor starts over from the prior
 			last_pose_read = ot_monotonic_ns();
 		} else if (src.kind == OTH_SRC_WEBCAM && c.source == OTH_SOURCE_AUTO) {
 			// A webcam serves while the display's own camera could not be opened: switch when it can.
@@ -1089,6 +1110,7 @@ worker(void *arg)
 				close_source(&src);
 				src = sh;
 				adopt_source(&c, &src, &k, &pose_raw, &pose, tracker, &hands);
+				c.hands.hand_scale = user_scale;
 				last_pose_read = ot_monotonic_ns();
 			}
 		}
