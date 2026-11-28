@@ -327,8 +327,9 @@ struct oth_hub
 	bool probed;
 	enum xrt_input_provider_presence presence;
 	ot_thread thread;
-	bool thread_running; //!< started and not yet joined
+	bool thread_running; //!< started and not yet joined; whoever clears it under the lock owns the join
 	bool thread_done;    //!< the worker returned; join before the next start
+	uint32_t stoppers;   //!< hub_stop calls in progress: no new worker meanwhile
 	volatile bool stop;
 	int64_t last_demand_ns;
 	int64_t retry_after_ns;
@@ -359,9 +360,20 @@ hub_stop(void);
 static void
 hub_stop_at_exit(void)
 {
-	if (g_hub_ready) {
-		hub_stop();
+	if (!g_hub_ready) {
+		return;
 	}
+#ifdef _WIN32
+	// A DLL's exit handlers run under the loader lock, after ExitProcess has already ended every other
+	// thread, possibly while one held g_h.lock: never lock or join here. Signal, and give a worker that
+	// is still alive (the DLL unloaded by FreeLibrary) a bounded moment to leave.
+	g_h.stop = true;
+	if (g_h.thread_running) {
+		WaitForSingleObject(g_h.thread, 2000);
+	}
+#else
+	hub_stop();
+#endif
 }
 
 static void
@@ -829,34 +841,36 @@ static void
 demand(void)
 {
 	const int64_t now = ot_monotonic_ns();
-	bool join = false;
-	ot_thread old;
-	memset(&old, 0, sizeof(old));
 	ot_lock(&g_h.lock);
 	g_h.last_demand_ns = now;
-	if (!g_h.probed || (g_h.thread_running && !g_h.thread_done) || now < g_h.retry_after_ns) {
+	if (!g_h.probed || g_h.stoppers > 0 || (g_h.thread_running && !g_h.thread_done) || now < g_h.retry_after_ns) {
 		ot_unlock(&g_h.lock);
 		return;
 	}
-	if (g_h.thread_running && g_h.thread_done) {
-		old = g_h.thread;
-		join = true;
+	if (g_h.thread_running) {
+		// The previous worker returned: take its handle (clearing thread_running hands the join to us
+		// alone), join it outside the lock (immediate), then decide again.
+		const ot_thread old = g_h.thread;
+		g_h.thread_running = false;
+		g_h.thread_done = false;
+		ot_unlock(&g_h.lock);
+		ot_thread_join(old);
+		ot_lock(&g_h.lock);
+		if (!g_h.probed || g_h.stoppers > 0 || g_h.thread_running) {
+			ot_unlock(&g_h.lock);
+			return;
+		}
 	}
-	g_h.thread_running = true; // claimed: a concurrent locate returns above
-	g_h.thread_done = false;
+	// Started under the lock, so thread_running and the handle change together for every reader.
 	g_h.stop = false;
-	ot_unlock(&g_h.lock);
-	if (join) {
-		ot_thread_join(old); // already returned: immediate
-	}
+	g_h.thread_done = false;
 	ot_thread t;
 	memset(&t, 0, sizeof(t));
 	const bool ok = ot_thread_start(&t, worker, NULL);
-	ot_lock(&g_h.lock);
 	if (ok) {
 		g_h.thread = t;
+		g_h.thread_running = true;
 	} else {
-		g_h.thread_running = false;
 		g_h.retry_after_ns = now + OTH_RETRY_NS;
 	}
 	ot_unlock(&g_h.lock);
@@ -865,6 +879,7 @@ demand(void)
 	}
 }
 
+//! Stop the worker and wait for it. Exactly one caller joins a given worker; demand starts none meanwhile.
 static void
 hub_stop(void)
 {
@@ -872,16 +887,17 @@ hub_stop(void)
 	const bool running = g_h.thread_running;
 	const ot_thread t = g_h.thread;
 	g_h.stop = true;
+	g_h.thread_running = false; // the join is ours
+	g_h.stoppers++;
 	ot_unlock(&g_h.lock);
 	if (running) {
 		ot_thread_join(t);
 	}
 	ot_lock(&g_h.lock);
-	g_h.thread_running = false;
 	g_h.thread_done = false;
+	g_h.stoppers--;
 	ot_unlock(&g_h.lock);
 }
-
 
 /*
  *
